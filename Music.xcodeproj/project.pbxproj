@@ -15,6 +15,7 @@
 		B56E11582E7BA6E70046E562 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B56E11572E7BA6E70046E562 /* Preview Assets.xcassets */; };
 		B56E115C2E7BA6E80046E562 /* DownloadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B56E11592E7BA6E80046E562 /* DownloadManager.swift */; };
 		B56E115D2E7BA6E80046E562 /* AudioPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B56E115A2E7BA6E80046E562 /* AudioPlayer.swift */; };
+		B56E11632E7BA6EA0046E562 /* RecentlyPlayedStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B56E11622E7BA6E90046E562 /* RecentlyPlayedStore.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -29,6 +30,7 @@
 		B56E11592E7BA6E80046E562 /* DownloadManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadManager.swift; sourceTree = "<group>"; };
 		B56E115A2E7BA6E80046E562 /* AudioPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPlayer.swift; sourceTree = "<group>"; };
 		B56E115F2E7BA6E80046E562 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		B56E11622E7BA6E90046E562 /* RecentlyPlayedStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentlyPlayedStore.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -67,6 +69,7 @@
 				B56E11512E7BA6E60046E562 /* ContentView.swift */,
 				B56E11592E7BA6E80046E562 /* DownloadManager.swift */,
 				B56E115A2E7BA6E80046E562 /* AudioPlayer.swift */,
+				B56E11622E7BA6E90046E562 /* RecentlyPlayedStore.swift */,
 				B56E115F2E7BA6E80046E562 /* Info.plist */,
 				B56E11532E7BA6E70046E562 /* Assets.xcassets */,
 				B56E11552E7BA6E70046E562 /* Music.entitlements */,
@@ -159,6 +162,7 @@
 				B56E11502E7BA6E60046E562 /* Music.xcdatamodeld in Sources */,
 				B56E115C2E7BA6E80046E562 /* DownloadManager.swift in Sources */,
 				B56E115D2E7BA6E80046E562 /* AudioPlayer.swift in Sources */,
+				B56E11632E7BA6EA0046E562 /* RecentlyPlayedStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
