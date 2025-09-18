@@ -63,16 +63,8 @@ final class MusicPlayer: ObservableObject {
         let tempSong = TempSong(from: track)
         currentSong = tempSong
         
-        // For Qobuz tracks, we'll stream them directly
-        if let urlString = track.url, let url = URL(string: urlString) {
-            do {
-                let player = try AVAudioPlayer(contentsOf: url)
-                player.play()
-                // AudioPlayer.shared manages actual playback elsewhere; this temp approach does not set isPlaying here
-            } catch {
-                print("Error playing Qobuz track: \(error)")
-            }
-        }
+        // Route streaming playback through the central AudioPlayer for consistent state
+        AudioPlayer.shared.play(tempSong: tempSong)
     }
     
     func togglePlayPause() {
