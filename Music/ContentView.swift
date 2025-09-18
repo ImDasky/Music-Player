@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import CoreData
 import AVFoundation
+import MediaPlayer
 
 // MARK: - BlurView (UIVisualEffectView wrapper)
 struct BlurView: UIViewRepresentable {
@@ -377,57 +378,168 @@ struct NowPlayingBar: View {
 // MARK: - FullPlayerView
 struct FullPlayerView: View {
     @EnvironmentObject var player: MusicPlayer
+    @ObservedObject private var audio = AudioPlayer.shared
+    @State private var isScrubbing = false
+    @State private var tempTime: Double = 0
+    @State private var isShuffling = false
+    @State private var repeatMode: RepeatMode = .off
+    @State private var showUpNext = false
+
+    enum RepeatMode { case off, one, all }
+
+    private func format(_ t: TimeInterval) -> String {
+        guard t.isFinite && !t.isNaN else { return "0:00" }
+        let total = Int(t.rounded())
+        let m = total / 60, s = total % 60
+        return String(format: "%d:%02d", m, s)
+    }
 
     var body: some View {
-        VStack {
-            Spacer()
-            
-            if let song = player.currentSong as? Song {
-                LocalArtworkView(song: song, size: 260)
-                    .frame(width: 260, height: 260)
-                    .cornerRadius(12).padding(.vertical, 24)
+        VStack(spacing: 16) {
+            Capsule().fill(Color.white.opacity(0.25)).frame(width: 40, height: 5).padding(.top, 8)
+            Spacer(minLength: 0)
 
-                Text(song.title ?? "Unknown Title")
-                    .font(.title).fontWeight(.semibold).foregroundColor(.white)
-                Text(song.artist ?? "Unknown Artist")
-                    .font(.subheadline).foregroundColor(.white.opacity(0.85))
-            } else if let tempSong = player.currentSong as? TempSong {
-                // Temporary Song from Qobuz
-                if let art = tempSong.artwork, let url = URL(string: art) {
-                    AsyncImage(url: url) { phase in
-                        if let image = phase.image {
-                            image.resizable().scaledToFit()
-                        } else if phase.error != nil {
-                            Image(systemName: "exclamationmark.triangle")
-                                .resizable()
-                                .scaledToFit()
-                                .foregroundColor(.gray)
-                        } else {
-                            Image(systemName: "music.note")
-                                .resizable()
-                                .scaledToFit()
-                                .foregroundColor(.gray)
+            // Artwork
+            if let song = player.currentSong as? Song {
+                LocalArtworkView(song: song, size: 300)
+                    .frame(width: 300, height: 300)
+                    .cornerRadius(16)
+                    .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 12)
+            } else if let tempSong = player.currentSong as? TempSong, let art = tempSong.artwork, let url = URL(string: art) {
+                AsyncImage(url: url) { phase in
+                    (phase.image?.resizable().scaledToFill()) ?? Image(systemName: "music.note").resizable().scaledToFit().foregroundColor(.gray)
+                }
+                .frame(width: 300, height: 300)
+                .cornerRadius(16)
+                .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 12)
+            }
+
+            // Titles
+            VStack(spacing: 4) {
+                if let song = player.currentSong as? Song {
+                    Text(song.title ?? "Unknown Title").font(.title2).fontWeight(.semibold).foregroundColor(.white)
+                    Text(song.artist ?? "Unknown Artist").font(.subheadline).foregroundColor(.white.opacity(0.85))
+                } else if let tempSong = player.currentSong as? TempSong {
+                    Text(tempSong.title).font(.title2).fontWeight(.semibold).foregroundColor(.white)
+                    Text(tempSong.artist).font(.subheadline).foregroundColor(.white.opacity(0.85))
+                }
+            }.padding(.top, 4)
+
+            // Scrubber
+            VStack(spacing: 6) {
+                Slider(value: Binding(
+                    get: { isScrubbing ? tempTime : audio.currentTime },
+                    set: { newVal in
+                        if !isScrubbing { tempTime = newVal }
+                        else { tempTime = newVal }
+                    }
+                ), in: 0...(audio.duration > 0 ? audio.duration : 1)) { Text("") } minimumValueLabel: {
+                    Text(format(isScrubbing ? tempTime : audio.currentTime)).font(.caption2).foregroundColor(.white.opacity(0.8))
+                } maximumValueLabel: {
+                    Text(format(audio.duration)).font(.caption2).foregroundColor(.white.opacity(0.8))
+                }
+                .accentColor(Color(red: 1.0, green: 45/255, blue: 85/255))
+                .onChange(of: isScrubbing) { editing in
+                    if !editing { AudioPlayer.shared.seek(to: tempTime) }
+                }
+                .gesture(DragGesture(minimumDistance: 0).onChanged { _ in
+                    if !isScrubbing {
+                        isScrubbing = true
+                        tempTime = audio.currentTime
+                    }
+                }.onEnded { _ in
+                    isScrubbing = false
+                })
+            }
+            .padding(.horizontal)
+
+            // Playback controls
+            HStack(spacing: 28) {
+                Button(action: { isShuffling.toggle() }) {
+                    Image(systemName: "shuffle").foregroundColor(isShuffling ? .white : .white.opacity(0.6))
+                }
+                Button(action: { /* previous placeholder */ }) {
+                    Image(systemName: "backward.fill").foregroundColor(.white)
+                }
+                Button(action: {
+                    if audio.isPlaying { AudioPlayer.shared.pause() } else { AudioPlayer.shared.resume() }
+                }) {
+                    Image(systemName: audio.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                        .font(.system(size: 64))
+                        .foregroundColor(Color(red: 1.0, green: 45/255, blue: 85/255))
+                }
+                Button(action: { /* next placeholder */ }) {
+                    Image(systemName: "forward.fill").foregroundColor(.white)
+                }
+                Button(action: {
+                    switch repeatMode { case .off: repeatMode = .one; case .one: repeatMode = .all; case .all: repeatMode = .off }
+                }) {
+                    let symbol: String = (repeatMode == .off ? "repeat" : (repeatMode == .one ? "repeat.1" : "repeat"))
+                    Image(systemName: symbol).foregroundColor(repeatMode == .off ? .white.opacity(0.6) : .white)
+                }
+            }
+            .font(.title2)
+
+            // Volume
+            VolumeView()
+                .frame(height: 36)
+                .padding(.horizontal)
+
+            // Up Next / Options row
+            HStack {
+                Button(action: { showUpNext.toggle() }) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "text.line.first.and.arrowtriangle.forward").foregroundColor(.white)
+                        Text("Up Next").foregroundColor(.white)
+                    }
+                }
+                Spacer()
+                Menu {
+                    Picker("Quality", selection: Binding(get: { AudioPlayer.shared.audioQuality }, set: { AudioPlayer.shared.setAudioQuality($0) })) {
+                        ForEach(AudioPlayer.AudioQuality.allCases, id: \.self) { q in
+                            Text(q.rawValue).tag(q)
                         }
                     }
-                    .frame(width: 260, height: 260)
-                    .cornerRadius(12).padding(.vertical, 24)
+                } label: {
+                    Image(systemName: "ellipsis.circle").foregroundColor(.white).font(.title3)
                 }
-
-                Text(tempSong.title)
-                    .font(.title).fontWeight(.semibold).foregroundColor(.white)
-                Text(tempSong.artist)
-                    .font(.subheadline).foregroundColor(.white.opacity(0.85))
             }
+            .padding(.horizontal)
 
-            Spacer()
-            Button(action: { player.togglePlayPause() }) {
-                Image(systemName: player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                    .font(.system(size: 72))
-                    .foregroundColor(Color(red: 1.0, green: 45/255, blue: 85/255))
-            }
-            Spacer()
+            Spacer(minLength: 0)
         }
-        .padding().background(Color.black.ignoresSafeArea())
+        .padding(.bottom, 20)
+        .background(Color.black.ignoresSafeArea())
+        .sheet(isPresented: $showUpNext) {
+            UpNextView().environmentObject(player)
+        }
+    }
+}
+
+// Volume slider wrapper
+struct VolumeView: UIViewRepresentable {
+    func makeUIView(context: Context) -> MPVolumeView { MPVolumeView(frame: .zero) }
+    func updateUIView(_ view: MPVolumeView, context: Context) {}
+}
+
+struct UpNextView: View {
+    @EnvironmentObject var player: MusicPlayer
+    var body: some View {
+        NavigationView {
+            List {
+                if let song = player.currentSong as? Song {
+                    HStack {
+                        LocalArtworkView(song: song, size: 44)
+                        VStack(alignment: .leading) {
+                            Text(song.title ?? "Unknown Title").foregroundColor(.white)
+                            Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
+                        }
+                    }
+                    .listRowBackground(Color.clear)
+                }
+            }
+            .navigationTitle("Up Next")
+        }
     }
 }
 
