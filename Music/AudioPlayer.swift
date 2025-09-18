@@ -182,7 +182,13 @@ class AudioPlayer: NSObject, ObservableObject {
             playFLACWithHighQuality(url: url)
         } else {
             // Use standard AVPlayer for other formats or streaming
-            playWithAVPlayer(url: url)
+            var fallback: URL? = nil
+            if url.scheme == "https", url.host == "us.doubledouble.top" {
+                var comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
+                comps?.scheme = "http"
+                fallback = comps?.url
+            }
+            playWithAVPlayer(url: url, fallbackURL: fallback)
         }
     }
     
@@ -255,7 +261,7 @@ class AudioPlayer: NSObject, ObservableObject {
         }
     }
     
-    private func playWithAVPlayer(url: URL) {
+    private func playWithAVPlayer(url: URL, fallbackURL: URL? = nil) {
         // Create AVPlayerItem from URL
         let playerItem = AVPlayerItem(url: url)
         player = AVPlayer(playerItem: playerItem)
@@ -270,6 +276,10 @@ class AudioPlayer: NSObject, ObservableObject {
         
         // Add observer for playback status
         playerItem.addObserver(self, forKeyPath: "status", options: [.new], context: nil)
+        // Store fallback on the item via associated object using KVO key path trick
+        if let fb = fallbackURL {
+            objc_setAssociatedObject(playerItem, &AssociatedKeys.fallbackURLKey, fb, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        }
         
         // Start playing (will actually start when ready)
         player?.play()
@@ -450,6 +460,8 @@ class AudioPlayer: NSObject, ObservableObject {
         stopTimeObserver()
     }
     
+    private struct AssociatedKeys { static var fallbackURLKey = "fallbackURLKey" }
+
     override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
         if keyPath == "status" {
             if let playerItem = object as? AVPlayerItem {
@@ -462,8 +474,14 @@ class AudioPlayer: NSObject, ObservableObject {
                     updateNowPlayingInfo()
                 case .failed:
                     print("Audio playback failed: \(playerItem.error?.localizedDescription ?? "Unknown error")")
-                    isPlaying = false
-                    updateNowPlayingInfo()
+                    // Try fallback URL if provided
+                    if let fb = objc_getAssociatedObject(playerItem, &AssociatedKeys.fallbackURLKey) as? URL {
+                        print("Retrying playback with fallback URL: \(fb.absoluteString)")
+                        playWithAVPlayer(url: fb, fallbackURL: nil)
+                    } else {
+                        isPlaying = false
+                        updateNowPlayingInfo()
+                    }
                 case .unknown:
                     print("Audio status unknown")
                 @unknown default:
