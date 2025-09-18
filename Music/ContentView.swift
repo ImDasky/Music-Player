@@ -856,6 +856,10 @@ struct UpNextView: View {
 }
 
 // MARK: - Local artwork extractor
+final class ArtworkImageCache {
+    static let shared = NSCache<NSString, UIImage>()
+}
+
 struct LocalArtworkView: View {
     @ObservedObject var song: Song
     let size: CGFloat
@@ -870,8 +874,6 @@ struct LocalArtworkView: View {
                     if let img = phase.image { img.resizable().scaledToFill() }
                     else { Image(systemName: "music.note").resizable().foregroundColor(.gray) }
                 }
-            } else if let art = song.artwork, !art.hasPrefix("http"), FileManager.default.fileExists(atPath: art), let data = try? Data(contentsOf: URL(fileURLWithPath: art)), let ui = UIImage(data: data) {
-                Image(uiImage: ui).resizable().scaledToFill()
             } else {
                 Image(systemName: "music.note").resizable().foregroundColor(.gray)
             }
@@ -880,93 +882,57 @@ struct LocalArtworkView: View {
         .clipped()
         .cornerRadius(size < 100 ? 6 : 12)
         .onAppear(perform: load)
-        .onChange(of: song.localFilePath) { _ in
-            // When the file path is set after download, try to extract embedded artwork
-            load()
-        }
+        .onChange(of: song.artwork) { _ in load() }
+        .onChange(of: song.localFilePath) { _ in load() }
         .onChange(of: song.downloadStatus) { newStatus in
-            if newStatus == DownloadStatus.downloaded.rawValue {
-                load()
-            }
-        }
-        .onChange(of: song.artwork) { _ in
-            load()
+            if newStatus == DownloadStatus.downloaded.rawValue { load() }
         }
     }
 
     private func load() {
-        guard let path = song.localFilePath, FileManager.default.fileExists(atPath: path) else { 
-            print("LocalArtworkView: No local file path or file doesn't exist")
-            return 
+        // Prefer saved local artwork path if present
+        guard let art = song.artwork, !art.isEmpty else { image = nil; return }
+        let cacheKey = NSString(string: "\(art)|\(Int(size))")
+        if let cached = ArtworkImageCache.shared.object(forKey: cacheKey) {
+            image = cached
+            return
         }
-        
-        print("LocalArtworkView: Loading artwork from \(path)")
-        let asset = AVAsset(url: URL(fileURLWithPath: path))
-        
-        // First try common metadata for artwork
-        if let img = extract(from: asset.commonMetadata) { 
-            print("LocalArtworkView: Found artwork in commonMetadata, size: \(img.size)")
-            image = img
-            return 
+        if art.hasPrefix("http") {
+            image = nil
+            return
         }
-        
-        // Try all available metadata formats
-        for fmt in asset.availableMetadataFormats {
-            print("LocalArtworkView: Checking metadata format: \(fmt)")
-            if let img = extract(from: asset.metadata(forFormat: fmt)) { 
-                print("LocalArtworkView: Found artwork in format \(fmt), size: \(img.size)")
-                image = img
-                return 
+        let path = art
+        guard FileManager.default.fileExists(atPath: path) else { image = nil; return }
+        let targetSize = CGSize(width: size * UIScreen.main.scale, height: size * UIScreen.main.scale)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let ui = downsampleImage(atPath: path, to: targetSize)
+            DispatchQueue.main.async {
+                if let ui {
+                    ArtworkImageCache.shared.setObject(ui, forKey: cacheKey)
+                    image = ui
+                } else {
+                    image = nil
+                }
             }
         }
-        
-        print("LocalArtworkView: No embedded artwork found")
     }
+}
 
-    private func extract(from items: [AVMetadataItem]) -> UIImage? {
-        // Look for artwork in various metadata keys
-        let artworkKeys = [
-            AVMetadataKey.commonKeyArtwork,
-            AVMetadataKey.id3MetadataKeyAttachedPicture,
-            AVMetadataKey.id3MetadataKeyAttachedPicture,
-            AVMetadataKey.quickTimeMetadataKeyArtwork,
-            AVMetadataKey.quickTimeMetadataKeyArtwork
-        ]
-        
-        for item in items {
-            // Check if this is an artwork item
-            if artworkKeys.contains(where: { item.commonKey == $0 }) || 
-               item.key?.description.contains("artwork") == true ||
-               item.key?.description.contains("picture") == true ||
-               item.key?.description.contains("cover") == true {
-                
-                print("LocalArtworkView: Found potential artwork item: \(item.key?.description ?? "unknown")")
-                
-                if let data = item.dataValue, let img = UIImage(data: data) { 
-                    print("LocalArtworkView: Successfully extracted image from dataValue, size: \(img.size)")
-                    return img 
-                }
-                if let data = item.value as? Data, let img = UIImage(data: data) { 
-                    print("LocalArtworkView: Successfully extracted image from value as Data, size: \(img.size)")
-                    return img 
-                }
-            }
-        }
-        
-        // Fallback: try all items regardless of key
-        for item in items {
-            if let data = item.dataValue, let img = UIImage(data: data) { 
-                print("LocalArtworkView: Fallback - extracted image from dataValue, size: \(img.size)")
-                return img 
-            }
-            if let data = item.value as? Data, let img = UIImage(data: data) { 
-                print("LocalArtworkView: Fallback - extracted image from value as Data, size: \(img.size)")
-                return img 
-            }
-        }
-        
-        return nil
-    }
+private func downsampleImage(atPath path: String, to size: CGSize) -> UIImage? {
+    let url = URL(fileURLWithPath: path)
+    let options: [CFString: Any] = [
+        kCGImageSourceShouldCache: false
+    ]
+    guard let src = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary) else { return nil }
+    let maxDim = max(size.width, size.height)
+    let downsampleOptions: [CFString: Any] = [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceShouldCacheImmediately: true,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+        kCGImageSourceThumbnailMaxPixelSize: max(1, Int(maxDim))
+    ]
+    guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, downsampleOptions as CFDictionary) else { return nil }
+    return UIImage(cgImage: cg)
 }
 
 // MARK: - Library (Apple Music style hub)

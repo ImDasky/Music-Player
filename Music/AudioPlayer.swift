@@ -140,6 +140,7 @@ class AudioPlayer: NSObject, ObservableObject {
     
     // MARK: - Play Song (Core Data)
     func play(song: Song) {
+        print("=== PLAY SONG CALLED ===")
         // Stop any previous playback to avoid stale isPlaying state
         stop()
         
@@ -147,13 +148,24 @@ class AudioPlayer: NSObject, ObservableObject {
         currentSong = song
         currentTempSong = nil
         
+        // Debug song state
+        print("Playing song: \(song.title ?? "Unknown")")
+        print("Download status: \(song.downloadStatus ?? "nil")")
+        print("Local file path: \(song.localFilePath ?? "nil")")
+        if let path = song.localFilePath {
+            print("File exists: \(FileManager.default.fileExists(atPath: path))")
+        }
+        
         // Try to play local FLAC file first
         if let localURL = DownloadManager.shared.getLocalFileURL(for: song) {
+            print("Using local file: \(localURL.path)")
             playFromURL(localURL, isLocalFile: true)
         } else if let urlString = song.url, let url = URL(string: urlString) {
+            print("Falling back to streaming: \(urlString)")
             // Fallback to streaming
             playFromURL(url, isLocalFile: false)
         } else {
+            print("No local file or streaming URL available")
             // Nothing to play; clear state
             isPlaying = false
             currentSong = nil
