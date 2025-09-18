@@ -127,6 +127,18 @@ final class LibraryManager: ObservableObject {
         )
     }
     
+    // Find matching song already in library (by title/artist or album)
+    func findSongMatching(track: QobuzTrack) -> Song? {
+        let request: NSFetchRequest<Song> = Song.fetchRequest()
+        if let album = track.album {
+            request.predicate = NSPredicate(format: "(title ==[cd] %@ AND artist ==[cd] %@) OR (album ==[cd] %@)", track.title, track.artist, album)
+        } else {
+            request.predicate = NSPredicate(format: "title ==[cd] %@ AND artist ==[cd] %@", track.title, track.artist)
+        }
+        request.fetchLimit = 1
+        do { return try viewContext.fetch(request).first } catch { return nil }
+    }
+
     func deleteSong(_ song: Song) {
         // Delete downloaded file if it exists
         DownloadManager.shared.deleteDownloadedFile(for: song)
@@ -939,8 +951,15 @@ struct SearchView: View {
                             .listRowBackground(Color.clear)
                             .contentShape(Rectangle()) // Make the row tappable
                             .onTapGesture {
-                                // Play the song when tapping anywhere on the row (doesn't add to library)
-                                player.playFromQobuz(track: track)
+                                // Prefer local if exists; else stream immediately
+                                if let localSong = libraryManager.findSongMatching(track: track),
+                                   let _ = DownloadManager.shared.getLocalFileURL(for: localSong) {
+                                    player.play(song: localSong)
+                                } else {
+                                    // Stream without adding to library
+                                    let temp = TempSong(from: track)
+                                    AudioPlayer.shared.play(tempSong: temp)
+                                }
                             }
                         }
                     }
