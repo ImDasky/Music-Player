@@ -726,6 +726,9 @@ struct SongsRootView: View {
                         SongRow(song: song)
                     }
                 }
+
+                // Extra bottom space so last items are fully scrollable above mini player/tab bar
+                Color.clear.frame(height: 140)
             }
             .padding(.top, 12)
         }
