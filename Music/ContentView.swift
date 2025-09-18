@@ -80,7 +80,7 @@ final class MusicPlayer: ObservableObject {
     private func rebuildPlayQueue(preserving current: Song?) {
         // Build play queue from base according to shuffle state
         if isShuffling {
-            var shuffled = baseQueue.shuffled()
+            let shuffled = baseQueue.shuffled()
             // Ensure current stays in queue
             if let current, let idx = shuffled.firstIndex(of: current) {
                 // Keep as-is, we'll set currentIndex below

@@ -515,7 +515,9 @@ class AudioPlayer: NSObject, ObservableObject {
         NotificationCenter.default.post(name: .audioPlayerDidFinish, object: self)
     }
     
-    private struct AssociatedKeys { static var fallbackURLKey = "fallbackURLKey" }
+    private struct AssociatedKeys { 
+        static var fallbackURLKey: UInt8 = 0
+    }
     
     override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
         if keyPath == "status" {
