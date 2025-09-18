@@ -744,6 +744,8 @@ struct RecentlyPlayedView: View {
 // MARK: - Song Row (simple inline for now)
 struct SongRow: View {
     @EnvironmentObject var player: MusicPlayer
+    @Environment(\.managedObjectContext) private var viewContext
+    @EnvironmentObject var libraryManager: LibraryManager
     let song: Song
 
     var body: some View {
@@ -754,6 +756,15 @@ struct SongRow: View {
                 Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
             }
             Spacer()
+            Menu {
+                Button(role: .destructive) { libraryManager.deleteSong(song) } label: { Label("Delete from Library", systemImage: "trash") }
+                Button { /* TODO: add to playlist */ print("Add to playlist tapped") } label: { Label("Add to Playlist", systemImage: "text.badge.plus") }
+                Button { /* TODO: play next */ print("Play next tapped") } label: { Label("Play Next", systemName: "text.line.first.and.arrowtriangle.forward") }
+                Button { /* TODO: play last */ print("Play last tapped") } label: { Label("Play Last", systemName: "text.line.last.and.arrowtriangle.backward") }
+                Button { /* TODO: show album */ print("Show album tapped") } label: { Label("Show Album", systemName: "square.stack") }
+            } label: {
+                Image(systemName: "ellipsis").rotationEffect(.degrees(90)).foregroundColor(.white)
+            }
         }
         .contentShape(Rectangle())
         .onTapGesture { player.play(song: song) }
@@ -862,6 +873,15 @@ struct SearchView: View {
                                     // Downloaded songs show nothing
                                 }
                                 Spacer()
+                                Menu {
+                                    Button(role: .destructive) { libraryManager.deleteSong(song) } label: { Label("Delete from Library", systemImage: "trash") }
+                                    Button { /* TODO: add to playlist */ print("Add to playlist tapped") } label: { Label("Add to Playlist", systemImage: "text.badge.plus") }
+                                    Button { /* TODO: play next */ print("Play next tapped") } label: { Label("Play Next", systemName: "text.line.first.and.arrowtriangle.forward") }
+                                    Button { /* TODO: play last */ print("Play last tapped") } label: { Label("Play Last", systemName: "text.line.last.and.arrowtriangle.backward") }
+                                    Button { /* TODO: show album */ print("Show album tapped") } label: { Label("Show Album", systemName: "square.stack") }
+                                } label: {
+                                    Image(systemName: "ellipsis").rotationEffect(.degrees(90)).foregroundColor(.white)
+                                }
                             }
                             .contentShape(Rectangle())
                             .onTapGesture { player.play(song: song) }
