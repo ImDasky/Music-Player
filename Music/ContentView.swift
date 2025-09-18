@@ -17,7 +17,7 @@ struct BlurView: UIViewRepresentable {
 
 // MARK: - Temporary Song for Playing
 struct TempSong: Identifiable, Hashable {
-    let id = UUID()
+    let id: UUID
     let title: String
     let artist: String
     let artwork: String?
@@ -25,11 +25,21 @@ struct TempSong: Identifiable, Hashable {
     let url: String?
     
     init(from track: QobuzTrack) {
+        self.id = UUID()
         self.title = track.title
         self.artist = track.artist
         self.artwork = track.image
         self.album = track.album
         self.url = track.url
+    }
+    
+    init(id: UUID = UUID(), title: String, artist: String, artwork: String?, album: String?, url: String?) {
+        self.id = id
+        self.title = title
+        self.artist = artist
+        self.artwork = artwork
+        self.album = album
+        self.url = url
     }
 }
 
@@ -956,9 +966,20 @@ struct SearchView: View {
                                    let _ = DownloadManager.shared.getLocalFileURL(for: localSong) {
                                     player.play(song: localSong)
                                 } else {
-                                    // Stream without adding to library
-                                    let temp = TempSong(from: track)
-                                    AudioPlayer.shared.play(tempSong: temp)
+                                    // Resolve full stream URL via existing flow and play
+                                    DownloadManager.shared.resolveStreamURLForQobuz(trackId: track.id) { result in
+                                        DispatchQueue.main.async {
+                                            switch result {
+                                            case .success(let url):
+                                                var temp = TempSong(from: track)
+                                                // Use resolved streaming URL
+                                                temp = TempSong(id: temp.id, title: temp.title, artist: temp.artist, artwork: temp.artwork, album: temp.album, url: url.absoluteString)
+                                                AudioPlayer.shared.play(tempSong: temp)
+                                            case .failure(let error):
+                                                print("Failed to resolve stream URL: \(error)")
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

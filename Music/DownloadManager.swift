@@ -385,6 +385,68 @@ class DownloadManager: ObservableObject {
     func getDownloadProgress(for songId: UUID) -> DownloadProgress? {
         return activeDownloads[songId]
     }
+    
+    // MARK: - Resolve Stream URL (reuse Qobuz flow without downloading)
+    func resolveStreamURLForQobuz(trackId: Int, completion: @escaping (Result<URL, Error>) -> Void) {
+        requestQobuzDownload(trackId: trackId) { [weak self] result in
+            switch result {
+            case .success(let downloadId):
+                self?.pollForStreamURL(downloadId: downloadId, completion: completion)
+            case .failure(let error):
+                completion(.failure(error))
+            }
+        }
+    }
+
+    private func pollForStreamURL(downloadId: String, completion: @escaping (Result<URL, Error>) -> Void) {
+        let statusURL = "https://us.doubledouble.top/dl/\(downloadId)"
+        guard let url = URL(string: statusURL) else {
+            completion(.failure(DownloadError.invalidURL)); return
+        }
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
+            if let error = error { completion(.failure(error)); return }
+            guard let data = data else { completion(.failure(DownloadError.noData)); return }
+            do {
+                let statusResponse = try JSONDecoder().decode(DownloadStatusResponse.self, from: data)
+                switch statusResponse.status {
+                case "queued":
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        self?.pollForStreamURL(downloadId: downloadId, completion: completion)
+                    }
+                case "done":
+                    if let fileURL = statusResponse.url {
+                        // Build corrected URL using the same logic as downloadCompletedFile
+                        let fullURL: String
+                        if fileURL.hasPrefix("http://") {
+                            fullURL = fileURL.replacingOccurrences(of: "http://", with: "https://")
+                        } else if fileURL.hasPrefix("./") {
+                            fullURL = "https://us.doubledouble.top\(fileURL)"
+                        } else if fileURL.hasPrefix("/") {
+                            fullURL = "https://us.doubledouble.top\(fileURL)"
+                        } else {
+                            fullURL = fileURL
+                        }
+                        let correctedURL = fullURL.replacingOccurrences(of: "us.doubledouble.top./", with: "us.doubledouble.top/")
+                        if let finalURL = URL(string: correctedURL) {
+                            completion(.success(finalURL))
+                        } else {
+                            completion(.failure(DownloadError.invalidURL))
+                        }
+                    } else {
+                        completion(.failure(DownloadError.noData))
+                    }
+                case "error", "failed":
+                    completion(.failure(DownloadError.downloadFailed))
+                default:
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        self?.pollForStreamURL(downloadId: downloadId, completion: completion)
+                    }
+                }
+            } catch {
+                completion(.failure(error))
+            }
+        }.resume()
+    }
 }
 
 // MARK: - Insecure URLSession Delegate
