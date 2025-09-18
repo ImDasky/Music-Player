@@ -570,6 +570,7 @@ struct FullPlayerView: View {
                 // Extra bottom space to allow scrolling further
                 Color.clear.frame(height: 300)
             }
+            .padding(.top, 60)
         }
         .padding(.bottom, 20)
         .background(Color.black.ignoresSafeArea())
