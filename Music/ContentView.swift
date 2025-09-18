@@ -776,19 +776,21 @@ struct SongsRootView: View {
             VStack(alignment: .leading, spacing: 20) {
                 if !recentlyAdded.isEmpty {
                     Text("Recently Added").font(.title2).bold().foregroundColor(.white).padding(.horizontal)
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 12) {
-                        ForEach(recentlyAdded) { song in
-                            VStack(alignment: .leading, spacing: 6) {
-                                LocalArtworkView(song: song, size: 110)
-                                Text(song.title ?? "Unknown").lineLimit(1).font(.caption).foregroundColor(.white)
-                                Text(song.artist ?? "Unknown").lineLimit(1).font(.caption2).foregroundColor(.white.opacity(0.7))
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        LazyHGrid(rows: [GridItem(.fixed(110), spacing: 12), GridItem(.fixed(110), spacing: 12)], spacing: 12) {
+                            ForEach(recentlyAdded) { song in
+                                VStack(alignment: .leading, spacing: 6) {
+                                    LocalArtworkView(song: song, size: 110)
+                                    Text(song.title ?? "Unknown").lineLimit(1).font(.caption).foregroundColor(.white)
+                                    Text(song.artist ?? "Unknown").lineLimit(1).font(.caption2).foregroundColor(.white.opacity(0.7))
+                                }
+                                .padding(.horizontal, 4)
+                                .contentShape(Rectangle())
+                                .onTapGesture { player.play(song: song) }
                             }
-                            .padding(.horizontal, 4)
-                            .contentShape(Rectangle())
-                            .onTapGesture { player.play(song: song) }
                         }
+                        .padding(.horizontal)
                     }
-                    .padding(.horizontal)
                 }
 
                 // Full list
