@@ -222,7 +222,7 @@ struct ContentView: View {
     @StateObject private var player = MusicPlayer()
     @StateObject private var libraryManager: LibraryManager
     
-    private let miniPlayerBottomPadding: CGFloat = 48
+    private let miniPlayerBottomPadding: CGFloat = 0
 
     init() {
         let persistenceController = PersistenceController.shared
