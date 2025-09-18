@@ -61,16 +61,31 @@ struct QobuzTrack: Decodable {
 final class MusicPlayer: ObservableObject {
     @Published var currentSong: Any? = nil // Can be Song or TempSong
     @Published var isPlaying: Bool = false
+    @Published var queue: [Song] = []
+    @Published var currentIndex: Int? = nil
 
     func play(song: Song) {
         currentSong = song
         AudioPlayer.shared.play(song: song)
         // isPlaying will be reflected by AudioPlayer.shared.isPlaying
+        if queue.isEmpty || (currentIndex == nil) {
+            // Build queue from all songs (latest added first)
+            let context = PersistenceController.shared.container.viewContext
+            let request: NSFetchRequest<Song> = Song.fetchRequest()
+            request.sortDescriptors = [NSSortDescriptor(key: "dateAdded", ascending: false)]
+            let all = (try? context.fetch(request)) ?? []
+            queue = all
+        }
+        if let idx = queue.firstIndex(of: song) { currentIndex = idx }
     }
     
     func play(tempSong: TempSong) {
         currentSong = tempSong
         AudioPlayer.shared.play(tempSong: tempSong)
+        
+        // Clear queue context when streaming temp content
+        currentIndex = nil
+        queue = []
     }
     
     func playFromQobuz(track: QobuzTrack) {
@@ -80,6 +95,27 @@ final class MusicPlayer: ObservableObject {
         
         // Route streaming playback through the central AudioPlayer for consistent state
         AudioPlayer.shared.play(tempSong: tempSong)
+        currentIndex = nil
+        queue = []
+    }
+    
+    func skipNext() {
+        guard let idx = currentIndex, idx + 1 < queue.count else { return }
+        let next = queue[idx + 1]
+        currentIndex = idx + 1
+        play(song: next)
+    }
+    
+    func skipPrevious(currentTime: TimeInterval) {
+        if currentTime > 3 { AudioPlayer.shared.seek(to: 0); return }
+        guard let idx = currentIndex else { AudioPlayer.shared.seek(to: 0); return }
+        if idx - 1 >= 0 {
+            let prev = queue[idx - 1]
+            currentIndex = idx - 1
+            play(song: prev)
+        } else {
+            AudioPlayer.shared.seek(to: 0)
+        }
     }
     
     func togglePlayPause() {
@@ -314,37 +350,8 @@ struct NowPlayingBar: View {
 
     private let blurStyle: UIBlurEffect.Style = .systemChromeMaterialDark
 
-    private func fetchAllSongs() -> [Song] {
-        let request: NSFetchRequest<Song> = Song.fetchRequest()
-        request.sortDescriptors = [NSSortDescriptor(key: "dateAdded", ascending: false)]
-        return (try? viewContext.fetch(request)) ?? []
-    }
-
-    private func skipForward() {
-        if let current = player.currentSong as? Song {
-            let all = fetchAllSongs()
-            if let idx = all.firstIndex(of: current), idx + 1 < all.count {
-                player.play(song: all[idx + 1])
-            }
-        }
-    }
-
-    private func skipBackward() {
-        if audio.currentTime > 3 {
-            AudioPlayer.shared.seek(to: 0)
-            return
-        }
-        if let current = player.currentSong as? Song {
-            let all = fetchAllSongs()
-            if let idx = all.firstIndex(of: current), idx - 1 >= 0 {
-                player.play(song: all[idx - 1])
-            } else {
-                AudioPlayer.shared.seek(to: 0)
-            }
-        } else {
-            AudioPlayer.shared.seek(to: 0)
-        }
-    }
+    private func skipForward() { player.skipNext() }
+    private func skipBackward() { player.skipPrevious(currentTime: audio.currentTime) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -448,38 +455,8 @@ struct FullPlayerView: View {
         let m = total / 60, s = total % 60
         return String(format: "%d:%02d", m, s)
     }
-
-    private func fetchAllSongs() -> [Song] {
-        let request: NSFetchRequest<Song> = Song.fetchRequest()
-        request.sortDescriptors = [NSSortDescriptor(key: "dateAdded", ascending: false)]
-        return (try? viewContext.fetch(request)) ?? []
-    }
-
-    private func skipForward() {
-        if let current = player.currentSong as? Song {
-            let all = fetchAllSongs()
-            if let idx = all.firstIndex(of: current), idx + 1 < all.count {
-                player.play(song: all[idx + 1])
-            }
-        }
-    }
-
-    private func skipBackward() {
-        if audio.currentTime > 3 {
-            AudioPlayer.shared.seek(to: 0)
-            return
-        }
-        if let current = player.currentSong as? Song {
-            let all = fetchAllSongs()
-            if let idx = all.firstIndex(of: current), idx - 1 >= 0 {
-                player.play(song: all[idx - 1])
-            } else {
-                AudioPlayer.shared.seek(to: 0)
-            }
-        } else {
-            AudioPlayer.shared.seek(to: 0)
-        }
-    }
+    private func skipForward() { player.skipNext() }
+    private func skipBackward() { player.skipPrevious(currentTime: audio.currentTime) }
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
@@ -667,15 +644,40 @@ struct UpNextView: View {
     var body: some View {
         NavigationView {
             List {
-                if let song = player.currentSong as? Song {
-                    HStack {
-                        LocalArtworkView(song: song, size: 44)
-                        VStack(alignment: .leading) {
-                            Text(song.title ?? "Unknown Title").foregroundColor(.white)
-                            Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
+                if let idx = player.currentIndex {
+                    let upcoming = Array(player.queue.dropFirst(idx + 1))
+                    Section(header: Text("Up Next").foregroundColor(.white)) {
+                        ForEach(upcoming) { song in
+                            HStack {
+                                LocalArtworkView(song: song, size: 44)
+                                VStack(alignment: .leading) {
+                                    Text(song.title ?? "Unknown Title").foregroundColor(.white)
+                                    Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
+                                }
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture { player.play(song: song) }
+                            .listRowBackground(Color.clear)
+                        }
+                        if upcoming.isEmpty {
+                            Text("No upcoming songs").foregroundColor(.white.opacity(0.6))
+                                .listRowBackground(Color.clear)
                         }
                     }
-                    .listRowBackground(Color.clear)
+                } else if let temp = player.currentSong as? TempSong {
+                    Section(header: Text("Now Playing").foregroundColor(.white)) {
+                        HStack {
+                            if let art = temp.artwork, let url = URL(string: art) {
+                                AsyncImage(url: url) { p in (p.image?.resizable()) ?? Image(systemName: "music.note").resizable() }
+                                    .frame(width: 44, height: 44).cornerRadius(6)
+                            }
+                            VStack(alignment: .leading) {
+                                Text(temp.title).foregroundColor(.white)
+                                Text(temp.artist).font(.caption).foregroundColor(.white.opacity(0.8))
+                            }
+                        }
+                        .listRowBackground(Color.clear)
+                    }
                 }
             }
             .navigationTitle("Up Next")
