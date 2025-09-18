@@ -777,21 +777,21 @@ struct SongsRootView: View {
                 if !recentlyAdded.isEmpty {
                     Text("Recently Added").font(.title2).bold().foregroundColor(.white).padding(.horizontal)
                     ScrollView(.horizontal, showsIndicators: false) {
-                        LazyHGrid(rows: [GridItem(.fixed(140), spacing: 16, alignment: .top), GridItem(.fixed(140), spacing: 16, alignment: .top)], spacing: 16) {
+                        LazyHGrid(rows: [GridItem(.fixed(150), spacing: 20, alignment: .top), GridItem(.fixed(150), spacing: 20, alignment: .top)], spacing: 20) {
                             ForEach(recentlyAdded) { song in
                                 VStack(alignment: .leading, spacing: 6) {
-                                    LocalArtworkView(song: song, size: 120)
+                                    LocalArtworkView(song: song, size: 130)
                                     Text(song.title ?? "Unknown").lineLimit(1).font(.caption).foregroundColor(.white)
                                     Text(song.artist ?? "Unknown").lineLimit(1).font(.caption2).foregroundColor(.white.opacity(0.7))
                                 }
-                                .frame(width: 140, alignment: .leading)
-                                .padding(.horizontal, 6)
+                                .frame(width: 160, alignment: .leading)
+                                .padding(.horizontal, 8)
                                 .contentShape(Rectangle())
                                 .onTapGesture { player.play(song: song) }
                             }
                         }
-                        .padding(.horizontal)
-                        .padding(.vertical, 4)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
                     }
                 }
 
