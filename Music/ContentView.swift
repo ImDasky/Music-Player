@@ -605,9 +605,15 @@ struct FullPlayerView: View {
                     Button(action: {
                         if audio.isPlaying { AudioPlayer.shared.pause() } else { AudioPlayer.shared.resume() }
                     }) {
-                        Image(systemName: audio.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.system(size: 40, weight: .bold))
-                            .foregroundColor(.white)
+                        ZStack {
+                            Image(systemName: "pause.fill")
+                                .opacity(audio.isPlaying ? 1 : 0)
+                            Image(systemName: "play.fill")
+                                .opacity(audio.isPlaying ? 0 : 1)
+                        }
+                        .font(.system(size: 40, weight: .bold))
+                        .foregroundColor(.white)
+                        .frame(width: 48, height: 48)
                     }
                     Button(action: { skipForward() }) {
                         Image(systemName: "forward.fill")
@@ -665,7 +671,7 @@ struct FullPlayerView: View {
                     .frame(width: 40, height: 5)
                     .padding(.top, 8)
             }
-            .padding(.bottom, 20)
+            .padding(.bottom, 40)
             .background(Color.black.ignoresSafeArea())
             .sheet(isPresented: $showUpNext) {
                 UpNextView().environmentObject(player)
