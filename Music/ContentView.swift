@@ -433,27 +433,17 @@ struct FullPlayerView: View {
 
             // Scrubber
             VStack(spacing: 6) {
-                Slider(value: Binding(
+                LineScrubber(currentTime: Binding(
                     get: { isScrubbing ? tempTime : audio.currentTime },
                     set: { newVal in
-                        if !isScrubbing { tempTime = newVal }
-                        else { tempTime = newVal }
+                        tempTime = max(0, min(newVal, max(audio.duration, 0)))
                     }
-                ), in: 0...(audio.duration > 0 ? audio.duration : 1)) { Text("") } minimumValueLabel: {
-                    Text(format(isScrubbing ? tempTime : audio.currentTime)).font(.caption2).foregroundColor(.white.opacity(0.8))
-                } maximumValueLabel: {
-                    Text(format(audio.duration)).font(.caption2).foregroundColor(.white.opacity(0.8))
-                }
-                .accentColor(Color(red: 1.0, green: 45/255, blue: 85/255))
-                .onChange(of: isScrubbing) { editing in
-                    if !editing { AudioPlayer.shared.seek(to: tempTime) }
-                }
-                .gesture(DragGesture(minimumDistance: 0).onChanged { _ in
-                    if !isScrubbing {
-                        isScrubbing = true
-                        tempTime = audio.currentTime
-                    }
-                }.onEnded { _ in
+                ), duration: audio.duration, onCommit: {
+                    AudioPlayer.shared.seek(to: tempTime)
+                }, onBegin: {
+                    isScrubbing = true
+                    tempTime = audio.currentTime
+                }, onEnd: {
                     isScrubbing = false
                 })
             }
@@ -470,9 +460,9 @@ struct FullPlayerView: View {
                 Button(action: {
                     if audio.isPlaying { AudioPlayer.shared.pause() } else { AudioPlayer.shared.resume() }
                 }) {
-                    Image(systemName: audio.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                        .font(.system(size: 64))
-                        .foregroundColor(Color(red: 1.0, green: 45/255, blue: 85/255))
+                    Image(systemName: audio.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 34, weight: .bold))
+                        .foregroundColor(.white)
                 }
                 Button(action: { /* next placeholder */ }) {
                     Image(systemName: "forward.fill").foregroundColor(.white)
@@ -526,6 +516,55 @@ struct FullPlayerView: View {
 struct VolumeView: UIViewRepresentable {
     func makeUIView(context: Context) -> MPVolumeView { MPVolumeView(frame: .zero) }
     func updateUIView(_ view: MPVolumeView, context: Context) {}
+}
+
+struct LineScrubber: View {
+    @Binding var currentTime: Double
+    let duration: Double
+    var onCommit: () -> Void
+    var onBegin: () -> Void
+    var onEnd: () -> Void
+
+    private func format(_ t: Double) -> String {
+        guard t.isFinite && !t.isNaN else { return "0:00" }
+        let total = Int(t.rounded())
+        let m = total / 60, s = total % 60
+        return String(format: "%d:%02d", m, s)
+    }
+
+    var body: some View {
+        VStack(spacing: 6) {
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.25)).frame(height: 3)
+                    Capsule().fill(Color.white).frame(width: progressWidth(total: geo.size.width), height: 3)
+                }
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        let x = max(0, min(value.location.x, geo.size.width))
+                        let ratio = (geo.size.width > 0 ? Double(x / geo.size.width) : 0)
+                        currentTime = ratio * max(duration, 0)
+                    }
+                    .onEnded { _ in onCommit(); onEnd() }
+                )
+                .onAppear { onBegin() }
+            }
+            .frame(height: 20)
+
+            HStack {
+                Text(format(currentTime)).font(.caption2).foregroundColor(.white.opacity(0.8))
+                Spacer()
+                Text(format(duration)).font(.caption2).foregroundColor(.white.opacity(0.8))
+            }
+        }
+    }
+
+    private func progressWidth(total: CGFloat) -> CGFloat {
+        guard duration > 0 else { return 0 }
+        let ratio = CGFloat(currentTime / duration)
+        return max(0, min(ratio * total, total))
+    }
 }
 
 struct UpNextView: View {
