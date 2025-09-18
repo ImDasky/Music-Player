@@ -524,6 +524,7 @@ struct LineScrubber: View {
     var onCommit: () -> Void
     var onBegin: () -> Void
     var onEnd: () -> Void
+    @State private var started = false
 
     private func format(_ t: Double) -> String {
         guard t.isFinite && !t.isNaN else { return "0:00" }
@@ -542,13 +543,17 @@ struct LineScrubber: View {
                 .contentShape(Rectangle())
                 .gesture(DragGesture(minimumDistance: 0)
                     .onChanged { value in
+                        if !started { started = true; onBegin() }
                         let x = max(0, min(value.location.x, geo.size.width))
                         let ratio = (geo.size.width > 0 ? Double(x / geo.size.width) : 0)
                         currentTime = ratio * max(duration, 0)
                     }
-                    .onEnded { _ in onCommit(); onEnd() }
+                    .onEnded { _ in
+                        onCommit()
+                        onEnd()
+                        started = false
+                    }
                 )
-                .onAppear { onBegin() }
             }
             .frame(height: 20)
 
