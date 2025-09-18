@@ -68,6 +68,11 @@ final class MusicPlayer: ObservableObject {
         // isPlaying will be reflected by AudioPlayer.shared.isPlaying
     }
     
+    func play(tempSong: TempSong) {
+        currentSong = tempSong
+        AudioPlayer.shared.play(tempSong: tempSong)
+    }
+    
     func playFromQobuz(track: QobuzTrack) {
         // Create a temporary Song object for playing
         let tempSong = TempSong(from: track)
@@ -966,15 +971,16 @@ struct SearchView: View {
                                    let _ = DownloadManager.shared.getLocalFileURL(for: localSong) {
                                     player.play(song: localSong)
                                 } else {
+                                    // Show UI immediately with temp metadata
+                                    let temp = TempSong(from: track)
+                                    player.play(tempSong: temp) // sets UI state
                                     // Resolve full stream URL via existing flow and play
                                     DownloadManager.shared.resolveStreamURLForQobuz(trackId: track.id) { result in
                                         DispatchQueue.main.async {
                                             switch result {
                                             case .success(let url):
-                                                var temp = TempSong(from: track)
-                                                // Use resolved streaming URL
-                                                temp = TempSong(id: temp.id, title: temp.title, artist: temp.artist, artwork: temp.artwork, album: temp.album, url: url.absoluteString)
-                                                AudioPlayer.shared.play(tempSong: temp)
+                                                let updated = TempSong(id: temp.id, title: temp.title, artist: temp.artist, artwork: temp.artwork, album: temp.album, url: url.absoluteString)
+                                                AudioPlayer.shared.play(tempSong: updated)
                                             case .failure(let error):
                                                 print("Failed to resolve stream URL: \(error)")
                                             }
