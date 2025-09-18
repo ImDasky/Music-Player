@@ -416,14 +416,37 @@ class DownloadManager: ObservableObject {
                 case "done":
                     if let fileURL = statusResponse.url {
                         let corrected = self?.correctedDownloadURL(from: fileURL)
-                        if let corrected,
-                           let maybeURL = URL(string: corrected) {
-                            self?.resolveIfStatusURL(maybeURL, completion: completion)
+                        guard let corrected, let maybeURL = URL(string: corrected) else {
+                            completion(.failure(DownloadError.invalidURL)); return
+                        }
+                        // If URL looks like a final media file (has extension), return it; otherwise try to resolve JSON, else poll again
+                        if !maybeURL.pathExtension.isEmpty {
+                            completion(.success(maybeURL))
                         } else {
-                            completion(.failure(DownloadError.invalidURL))
+                            self?.resolveIfStatusURL(maybeURL) { result in
+                                switch result {
+                                case .success(let finalURL):
+                                    if finalURL.pathExtension.isEmpty {
+                                        // Still not a media URL; poll again
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                                            self?.pollForStreamURL(downloadId: downloadId, completion: completion)
+                                        }
+                                    } else {
+                                        completion(.success(finalURL))
+                                    }
+                                case .failure:
+                                    // Could not resolve; poll again
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                                        self?.pollForStreamURL(downloadId: downloadId, completion: completion)
+                                    }
+                                }
+                            }
                         }
                     } else {
-                        completion(.failure(DownloadError.noData))
+                        // No URL yet; poll again
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                            self?.pollForStreamURL(downloadId: downloadId, completion: completion)
+                        }
                     }
                 case "error", "failed":
                     completion(.failure(DownloadError.downloadFailed))
@@ -433,7 +456,10 @@ class DownloadManager: ObservableObject {
                     }
                 }
             } catch {
-                completion(.failure(error))
+                // If not JSON (unexpected), poll again briefly
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    self?.pollForStreamURL(downloadId: downloadId, completion: completion)
+                }
             }
         }.resume()
     }
