@@ -307,15 +307,19 @@ class AudioPlayer: NSObject, ObservableObject {
             player?.pause()
         }
         isPlaying = false
+        updateNowPlayingInfo()
     }
     
     func resume() {
         if let playerNode = audioPlayerNode {
             playerNode.play()
+            // Restart timer for high-quality playback to update currentTime
+            startHighQualityTimeObserver()
         } else {
             player?.play()
         }
         isPlaying = true
+        updateNowPlayingInfo()
     }
     
     func stop() {
@@ -339,11 +343,17 @@ class AudioPlayer: NSObject, ObservableObject {
     
     func seek(to time: TimeInterval) {
         if let playerNode = audioPlayerNode, let file = audioFile {
-            // Seek in high-quality playback
-            let sampleTime = AVAudioFramePosition(time * file.processingFormat.sampleRate)
-            let playerTime = AVAudioTime(sampleTime: sampleTime, atRate: file.processingFormat.sampleRate)
+            // Seek in high-quality playback using scheduleSegment for accuracy
+            let sampleRate = file.processingFormat.sampleRate
+            let totalFrames = AVAudioFramePosition(file.length)
+            let startFrame = AVAudioFramePosition(max(0, min(time, duration)) * sampleRate)
+            let framesToPlay = totalFrames - startFrame
             playerNode.stop()
-            playerNode.scheduleFile(file, at: playerTime) { [weak self] in
+            audioEngine?.stop()
+            do {
+                try audioEngine?.start()
+            } catch {}
+            playerNode.scheduleSegment(file, startingFrame: startFrame, frameCount: AVAudioFrameCount(max(0, framesToPlay)), at: nil) { [weak self] in
                 DispatchQueue.main.async {
                     self?.isPlaying = false
                     self?.currentTime = 0
