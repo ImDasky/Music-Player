@@ -101,69 +101,46 @@ final class LibraryManager: ObservableObject {
             song.title == title && song.artist == artist
         }
         
-        if !songExists {
-            let song = Song(context: viewContext)
-            song.id = UUID()
-            song.title = title
-            song.artist = artist
-            song.artwork = artwork
-            song.album = album
-            song.url = url
-            song.qobuzTrackId = Int32(qobuzTrackId ?? 0)
-            song.dateAdded = Date()
-            song.downloadStatus = DownloadStatus.downloading.rawValue // Start downloading immediately
-            persistenceController.save()
+        if songExists {
+            return false
+        }
+        
+        let song = Song(context: viewContext)
+        song.id = UUID()
+        song.title = title
+        song.artist = artist
+        song.artwork = artwork
+        song.album = album
+        song.url = url
+        song.qobuzTrackId = Int64(qobuzTrackId ?? 0)
+        song.dateAdded = Date()
+        song.downloadStatus = DownloadStatus.notDownloaded.rawValue
+        
+        do {
+            try viewContext.save()
             
-            // Start download immediately when adding to library
+            // If it's a Qobuz track, start the download process
             if let trackId = qobuzTrackId {
                 DownloadManager.shared.downloadSongFromQobuz(song, trackId: trackId, context: viewContext)
-            } else {
-                DownloadManager.shared.downloadSong(song, context: viewContext)
             }
-            return true // Successfully added
+            
+            return true
+        } catch {
+            print("Error saving song: \(error)")
+            return false
         }
-        return false // Already exists
-    }
-    
-    func addSong(from qobuzTrack: QobuzTrack) -> Bool {
-        return addSong(
-            title: qobuzTrack.title,
-            artist: qobuzTrack.artist,
-            artwork: qobuzTrack.image,
-            album: qobuzTrack.album,
-            url: qobuzTrack.url,
-            qobuzTrackId: qobuzTrack.id
-        )
     }
     
     func deleteSong(_ song: Song) {
-        // Delete downloaded file if it exists
+        // Delete the downloaded file if it exists
         DownloadManager.shared.deleteDownloadedFile(for: song)
+        
         viewContext.delete(song)
-        persistenceController.save()
+        try? viewContext.save()
     }
     
-    func searchSongs(query: String) -> [Song] {
-        if query.isEmpty {
-            return getAllSongs()
-        } else {
-            return searchSongsInDatabase(query: query)
-        }
-    }
-    
-    func isSongInLibrary(title: String, artist: String) -> Bool {
-        let existingSongs = getAllSongs()
-        return existingSongs.contains { song in
-            song.title == title && song.artist == artist
-        }
-    }
-    
-    // MARK: - Private Helper Methods
     private func getAllSongs() -> [Song] {
         let request: NSFetchRequest<Song> = Song.fetchRequest()
-        let sortDescriptor = NSSortDescriptor(key: "dateAdded", ascending: false)
-        request.sortDescriptors = [sortDescriptor]
-        
         do {
             return try viewContext.fetch(request)
         } catch {
@@ -172,12 +149,9 @@ final class LibraryManager: ObservableObject {
         }
     }
     
-    private func searchSongsInDatabase(query: String) -> [Song] {
+    func searchSongs(query: String) -> [Song] {
         let request: NSFetchRequest<Song> = Song.fetchRequest()
         request.predicate = NSPredicate(format: "title CONTAINS[cd] %@ OR artist CONTAINS[cd] %@ OR album CONTAINS[cd] %@", query, query, query)
-        let sortDescriptor = NSSortDescriptor(key: "dateAdded", ascending: false)
-        request.sortDescriptors = [sortDescriptor]
-        
         do {
             return try viewContext.fetch(request)
         } catch {
@@ -187,215 +161,76 @@ final class LibraryManager: ObservableObject {
     }
 }
 
-// MARK: - Qobuz API Client
-final class QobuzAPI: ObservableObject {
-    @Published var results: [QobuzTrack] = []
-
+// MARK: - Qobuz API
+class QobuzAPI: ObservableObject {
+    @Published var tracks: [QobuzTrack] = []
+    @Published var isLoading = false
+    
     func search(query: String) {
-        guard let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-              let url = URL(string: "https://www.qobuz.com/v4/us-en/catalog/search/autosuggest?q=\(encoded)") else { return }
-
-        var request = URLRequest(url: url)
-        request.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
-
-        URLSession.shared.dataTask(with: request) { data, _, error in
-            if let data = data {
-                do {
-                    let decoded = try JSONDecoder().decode(QobuzResponse.self, from: data)
-                    DispatchQueue.main.async {
-                        self.results = decoded.tracks ?? []
+        isLoading = true
+        let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let url = URL(string: "https://us.doubledouble.top/search?q=\(encodedQuery)")!
+        
+        URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                self?.isLoading = false
+                if let data = data {
+                    do {
+                        let response = try JSONDecoder().decode(QobuzResponse.self, from: data)
+                        self?.tracks = response.tracks ?? []
+                    } catch {
+                        print("Error decoding Qobuz response: \(error)")
+                        self?.tracks = []
                     }
-                } catch {
-                    print("Decoding error:", error)
                 }
-            } else if let error = error {
-                print("Request error:", error)
             }
         }.resume()
     }
 }
 
-// MARK: - ContentView
+// MARK: - Main ContentView
 struct ContentView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @StateObject private var player = MusicPlayer()
     @StateObject private var libraryManager: LibraryManager
+    @StateObject private var persistenceController = PersistenceController.shared
     
-    private let miniPlayerBottomPadding: CGFloat = 48
-
     init() {
         let persistenceController = PersistenceController.shared
-        let context = persistenceController.container.viewContext
-        let manager = LibraryManager(context: context, persistenceController: persistenceController)
-        _libraryManager = StateObject(wrappedValue: manager)
+        _libraryManager = StateObject(wrappedValue: LibraryManager(context: persistenceController.container.viewContext, persistenceController: persistenceController))
     }
-
+    
     var body: some View {
         TabView {
-            // Library Tab
-            ZStack(alignment: .bottom) {
-                LibraryView()
-                    .environmentObject(player)
-                    .environmentObject(libraryManager)
-                    .environment(\.managedObjectContext, viewContext)
-
-                if player.currentSong != nil {
-                    NowPlayingBar()
-                        .environmentObject(player)
-                        .padding(.bottom, miniPlayerBottomPadding)
-                }
-            }
-            .tabItem {
-                ZStack {
-                    Image(systemName: "rectangle.stack.fill")
+            LibraryView()
+                .tabItem {
                     Image(systemName: "music.note")
-                        .offset(x: 8, y: 8)
+                    Text("Library")
                 }
-                Text("Library")
-            }
-
-            // Radio Tab
-            ZStack(alignment: .bottom) {
-                RadioView()
-                if player.currentSong != nil {
-                    NowPlayingBar()
-                        .environmentObject(player)
-                        .padding(.bottom, miniPlayerBottomPadding)
-                }
-            }
-            .tabItem {
-                Label("Radio", systemImage: "dot.radiowaves.left.and.right")
-            }
-
-            // Search Tab
-            ZStack(alignment: .bottom) {
-                SearchView()
-                    .environmentObject(player)
-                    .environmentObject(libraryManager)
-                    .environment(\.managedObjectContext, viewContext)
-                if player.currentSong != nil {
-                    NowPlayingBar()
-                        .environmentObject(player)
-                        .padding(.bottom, miniPlayerBottomPadding)
-                }
-            }
-            .tabItem {
-                Label("Search", systemImage: "magnifyingglass")
-            }
-        }
-        .accentColor(.white)
-    }
-}
-
-// MARK: - NowPlayingBar
-struct NowPlayingBar: View {
-    @EnvironmentObject var player: MusicPlayer
-    @State private var showFullPlayer = false
-
-    private let blurStyle: UIBlurEffect.Style = .systemChromeMaterialDark
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Rectangle()
-                .fill(Color.white.opacity(0.06))
-                .frame(height: 0.5)
-
-            HStack(spacing: 12) {
-                if let song = player.currentSong as? Song {
-                    // Core Data Song
-                    if let art = song.artwork, let url = URL(string: art) {
-                        AsyncImage(url: url) { phase in
-                            if let image = phase.image {
-                                image.resizable()
-                            } else if phase.error != nil {
-                                Image(systemName: "exclamationmark.triangle")
-                                    .resizable()
-                                    .foregroundColor(.gray)
-                            } else {
-                                Image(systemName: "music.note")
-                                    .resizable()
-                                    .foregroundColor(.gray)
-                            }
-                        }
-                        .frame(width: 44, height: 44)
-                        .cornerRadius(4)
-                    } else {
-                        Image(systemName: song.artwork ?? "music.note")
-                            .resizable()
-                            .frame(width: 44, height: 44)
-                            .cornerRadius(4)
-                    }
-                } else if let tempSong = player.currentSong as? TempSong {
-                    // Temporary Song from Qobuz
-                    if let art = tempSong.artwork, let url = URL(string: art) {
-                        AsyncImage(url: url) { phase in
-                            if let image = phase.image {
-                                image.resizable()
-                            } else if phase.error != nil {
-                                Image(systemName: "exclamationmark.triangle")
-                                    .resizable()
-                                    .foregroundColor(.gray)
-                            } else {
-                                Image(systemName: "music.note")
-                                    .resizable()
-                                    .foregroundColor(.gray)
-                            }
-                        }
-                        .frame(width: 44, height: 44)
-                        .cornerRadius(4)
-                    } else {
-                        Image(systemName: tempSong.artwork ?? "music.note")
-                            .resizable()
-                            .frame(width: 44, height: 44)
-                            .cornerRadius(4)
-                    }
-                }
-
-                VStack(alignment: .leading) {
-                    if let song = player.currentSong as? Song {
-                        Text(song.title ?? "Unknown Title")
-                            .font(.subheadline).fontWeight(.semibold).foregroundColor(.white)
-                        Text(song.artist ?? "Unknown Artist")
-                            .font(.caption).foregroundColor(.white.opacity(0.8))
-                    } else if let tempSong = player.currentSong as? TempSong {
-                        Text(tempSong.title)
-                            .font(.subheadline).fontWeight(.semibold).foregroundColor(.white)
-                        Text(tempSong.artist)
-                            .font(.caption).foregroundColor(.white.opacity(0.8))
-                    }
-                }
-                Spacer()
-
-                HStack(spacing: 16) {
-                    Button(action: { player.togglePlayPause() }) {
-                        Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
-                            .foregroundColor(.white)
-                    }
-                    Button(action: {}) {
-                        Image(systemName: "forward.fill")
-                            .foregroundColor(.white)
-                    }
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-        }
-        .background(
-            ZStack {
-                BlurView(style: blurStyle)
-                Color(white: 0.06).opacity(0.25)
-            }
-        )
-        .onTapGesture { showFullPlayer.toggle() }
-        .sheet(isPresented: $showFullPlayer) {
-            FullPlayerView()
                 .environmentObject(player)
+                .environmentObject(libraryManager)
+            
+            RadioView()
+                .tabItem {
+                    Image(systemName: "radio")
+                    Text("Radio")
+                }
+            
+            SearchView()
+                .tabItem {
+                    Image(systemName: "magnifyingglass")
+                    Text("Search")
+                }
+                .environmentObject(player)
+                .environmentObject(libraryManager)
         }
+        .accentColor(Color(red: 1.0, green: 45/255, blue: 85/255))
+        .background(Color.black.ignoresSafeArea())
     }
 }
 
-// MARK: - FullPlayerView
-struct FullPlayerView: View {
+// MARK: - NowPlayingView
+struct NowPlayingView: View {
     @EnvironmentObject var player: MusicPlayer
 
     var body: some View {
@@ -403,31 +238,20 @@ struct FullPlayerView: View {
             Spacer()
             
             if let song = player.currentSong as? Song {
-                // Core Data Song
-                if let art = song.artwork, let url = URL(string: art) {
-                    AsyncImage(url: url) { phase in
-                        if let image = phase.image {
-                            image.resizable().scaledToFit()
-                        } else if phase.error != nil {
-                            Image(systemName: "exclamationmark.triangle")
-                                .resizable()
-                                .scaledToFit()
-                                .foregroundColor(.gray)
-                        } else {
-                            Image(systemName: "music.note")
-                                .resizable()
-                                .scaledToFit()
-                                .foregroundColor(.gray)
-                        }
-                    }
+                // Core Data Song - display FLAC metadata
+                SongArtworkView(song: song)
                     .frame(width: 260, height: 260)
-                    .cornerRadius(12).padding(.vertical, 24)
-                }
+                    .cornerRadius(12)
+                    .padding(.vertical, 24)
 
                 Text(song.title ?? "Unknown Title")
                     .font(.title).fontWeight(.semibold).foregroundColor(.white)
                 Text(song.artist ?? "Unknown Artist")
                     .font(.subheadline).foregroundColor(.white.opacity(0.85))
+                if let album = song.album, !album.isEmpty {
+                    Text(album)
+                        .font(.caption).foregroundColor(.white.opacity(0.7))
+                }
             } else if let tempSong = player.currentSong as? TempSong {
                 // Temporary Song from Qobuz
                 if let art = tempSong.artwork, let url = URL(string: art) {
@@ -448,12 +272,23 @@ struct FullPlayerView: View {
                     }
                     .frame(width: 260, height: 260)
                     .cornerRadius(12).padding(.vertical, 24)
+                } else {
+                    Image(systemName: "music.note")
+                        .resizable()
+                        .scaledToFit()
+                        .foregroundColor(.gray)
+                        .frame(width: 260, height: 260)
+                        .cornerRadius(12).padding(.vertical, 24)
                 }
 
                 Text(tempSong.title)
                     .font(.title).fontWeight(.semibold).foregroundColor(.white)
                 Text(tempSong.artist)
                     .font(.subheadline).foregroundColor(.white.opacity(0.85))
+                if let album = tempSong.album, !album.isEmpty {
+                    Text(album)
+                        .font(.caption).foregroundColor(.white.opacity(0.7))
+                }
             }
 
             Spacer()
@@ -465,6 +300,29 @@ struct FullPlayerView: View {
             Spacer()
         }
         .padding().background(Color.black.ignoresSafeArea())
+    }
+}
+
+// MARK: - Song Artwork View
+struct SongArtworkView: View {
+    let song: Song
+    
+    var body: some View {
+        Group {
+            if let artworkPath = song.artwork, 
+               FileManager.default.fileExists(atPath: artworkPath),
+               let imageData = FLACMetadataExtractor.getArtworkImage(for: song),
+               let uiImage = UIImage(data: imageData) {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                Image(systemName: "music.note")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundColor(.gray)
+            }
+        }
     }
 }
 
@@ -484,11 +342,16 @@ struct LibraryView: View {
                 Section(header: Text("Songs").foregroundColor(.white)) {
                     ForEach(songs) { song in
                         HStack {
-                            Image(systemName: song.artwork ?? "music.note")
-                                .resizable().frame(width: 44, height: 44).cornerRadius(5)
+                            SongArtworkView(song: song)
+                                .frame(width: 44, height: 44)
+                                .cornerRadius(5)
+                            
                             VStack(alignment: .leading) {
                                 Text(song.title ?? "Unknown Title").foregroundColor(.white)
                                 Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
+                                if let album = song.album, !album.isEmpty {
+                                    Text(album).font(.caption2).foregroundColor(.white.opacity(0.6))
+                                }
                                 
                                 // Show status for downloading, queued, or failed
                                 if song.downloadStatus == DownloadStatus.downloading.rawValue {
@@ -602,129 +465,135 @@ struct SearchView: View {
                     }
                     .pickerStyle(SegmentedPickerStyle())
                     .padding(.horizontal)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .animation(.easeInOut(duration: 0.3), value: searchFocused || !query.isEmpty)
-                    .onChange(of: mode) { newValue in
-                        if newValue == .library {
-                            filteredLibrary = libraryManager.searchSongs(query: query)
-                        } else if !query.isEmpty {
-                            qobuzAPI.search(query: query)
-                        }
-                    }
                 }
 
-                List {
+                if searchFocused || !query.isEmpty {
                     if mode == .library {
-                        ForEach(filteredLibrary) { song in
-                            HStack {
-                                Image(systemName: song.artwork ?? "music.note")
-                                    .resizable().frame(width: 44, height: 44).cornerRadius(5)
-                                VStack(alignment: .leading) {
-                                    Text(song.title ?? "Unknown Title").foregroundColor(.white)
-                                    Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
+                        List {
+                            ForEach(filteredLibrary) { song in
+                                HStack {
+                                    SongArtworkView(song: song)
+                                        .frame(width: 44, height: 44)
+                                        .cornerRadius(5)
                                     
-                                    // Show status for downloading, queued, or failed
-                                    if song.downloadStatus == DownloadStatus.downloading.rawValue {
-                                        Text("Downloading...")
-                                            .font(.caption2)
-                                            .foregroundColor(.blue)
-                                    } else if song.downloadStatus == DownloadStatus.queued.rawValue {
-                                        Text("Queued...")
-                                            .font(.caption2)
-                                            .foregroundColor(.orange)
-                                    } else if song.downloadStatus == DownloadStatus.failed.rawValue {
-                                        Text("Failed")
-                                            .font(.caption2)
-                                            .foregroundColor(.red)
+                                    VStack(alignment: .leading) {
+                                        Text(song.title ?? "Unknown Title").foregroundColor(.white)
+                                        Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
+                                        if let album = song.album, !album.isEmpty {
+                                            Text(album).font(.caption2).foregroundColor(.white.opacity(0.6))
+                                        }
                                     }
-                                    // Downloaded songs show nothing
+                                    Spacer()
+                                    Button(action: { player.play(song: song) }) {
+                                        Image(systemName: "play.fill").foregroundColor(.white)
+                                    }
                                 }
-                                Spacer()
-                                
-                                // Play button
-                                Button(action: { player.play(song: song) }) {
-                                    Image(systemName: "play.fill").foregroundColor(.white)
-                                }
+                                .listRowBackground(Color.clear)
                             }
-                            .listRowBackground(Color.clear)
                         }
                     } else {
-                        ForEach(qobuzAPI.results, id: \.id) { track in
-                            HStack {
-                                if let art = track.image, let url = URL(string: art) {
-                                    AsyncImage(url: url) { phase in
-                                        if let image = phase.image {
-                                            image.resizable()
-                                        } else if phase.error != nil {
-                                            Image(systemName: "exclamationmark.triangle")
-                                                .resizable()
-                                                .foregroundColor(.gray)
+                        if qobuzAPI.isLoading {
+                            ProgressView("Searching...")
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        } else {
+                            List {
+                                ForEach(qobuzAPI.tracks) { track in
+                                    HStack {
+                                        if let imageUrl = track.image, let url = URL(string: imageUrl) {
+                                            AsyncImage(url: url) { phase in
+                                                if let image = phase.image {
+                                                    image.resizable().scaledToFit()
+                                                } else if phase.error != nil {
+                                                    Image(systemName: "music.note")
+                                                        .resizable()
+                                                        .scaledToFit()
+                                                        .foregroundColor(.gray)
+                                                } else {
+                                                    Image(systemName: "music.note")
+                                                        .resizable()
+                                                        .scaledToFit()
+                                                        .foregroundColor(.gray)
+                                                }
+                                            }
+                                            .frame(width: 44, height: 44)
+                                            .cornerRadius(5)
                                         } else {
                                             Image(systemName: "music.note")
                                                 .resizable()
+                                                .scaledToFit()
                                                 .foregroundColor(.gray)
+                                                .frame(width: 44, height: 44)
+                                                .cornerRadius(5)
                                         }
-                                    }
-                                    .frame(width: 44, height: 44)
-                                    .cornerRadius(4)
-                                }
-
-                                VStack(alignment: .leading) {
-                                    Text(track.title).foregroundColor(.white)
-                                    Text(track.artist).font(.caption).foregroundColor(.white.opacity(0.8))
-                                    if let album = track.album {
-                                        Text(album).font(.caption2).foregroundColor(.white.opacity(0.6))
-                                    }
-                                }
-                                Spacer()
-                                
-                                let songKey = "\(track.title)-\(track.artist)"
-                                let isInLibrary = libraryManager.isSongInLibrary(title: track.title, artist: track.artist)
-                                let wasJustAdded = addedSongs.contains(songKey)
-                                let isAdding = addingSongs.contains(songKey)
-                                
-                                // Add to library button (which now downloads automatically)
-                                Button(action: {
-                                    if !isInLibrary && !isAdding {
-                                        addingSongs.insert(songKey)
                                         
-                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                            let success = libraryManager.addSong(from: track)
-                                            addingSongs.remove(songKey)
-                                            
-                                            if success {
-                                                addedSongs.insert(songKey)
-                                                // Remove from added songs after 2 seconds
-                                                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                                                    addedSongs.remove(songKey)
-                                                }
+                                        VStack(alignment: .leading) {
+                                            Text(track.title).foregroundColor(.white)
+                                            Text(track.artist).font(.caption).foregroundColor(.white.opacity(0.8))
+                                            if let album = track.album {
+                                                Text(album).font(.caption2).foregroundColor(.white.opacity(0.6))
                                             }
                                         }
+                                        
+                                        Spacer()
+                                        
+                                        HStack(spacing: 12) {
+                                            // Play button
+                                            Button(action: { 
+                                                player.playFromQobuz(track: track)
+                                            }) {
+                                                Image(systemName: "play.fill")
+                                                    .foregroundColor(.white)
+                                            }
+                                            .buttonStyle(PlainButtonStyle())
+                                            
+                                            // Add to library button
+                                            Button(action: {
+                                                let songKey = "\(track.id)"
+                                                addingSongs.insert(songKey)
+                                                
+                                                let success = libraryManager.addSong(
+                                                    title: track.title,
+                                                    artist: track.artist,
+                                                    artwork: track.image,
+                                                    album: track.album,
+                                                    url: track.url,
+                                                    qobuzTrackId: track.id
+                                                )
+                                                
+                                                if success {
+                                                    addedSongs.insert(songKey)
+                                                }
+                                                
+                                                addingSongs.remove(songKey)
+                                            }) {
+                                                let songKey = "\(track.id)"
+                                                if addingSongs.contains(songKey) {
+                                                    ProgressView()
+                                                        .scaleEffect(0.8)
+                                                } else if addedSongs.contains(songKey) {
+                                                    Image(systemName: "checkmark")
+                                                        .foregroundColor(.red)
+                                                        .scaleEffect(1.2)
+                                                        .animation(.easeInOut(duration: 0.2), value: addedSongs.contains(songKey))
+                                                } else {
+                                                    Image(systemName: "plus")
+                                                        .foregroundColor(.white)
+                                                }
+                                            }
+                                            .buttonStyle(PlainButtonStyle())
+                                        }
                                     }
-                                }) {
-                                    Image(systemName: isInLibrary || wasJustAdded ? "checkmark" : "plus")
-                                        .foregroundColor(isInLibrary || wasJustAdded ? .red : .white)
-                                        .font(.system(size: 18, weight: .bold))
+                                    .listRowBackground(Color.clear)
                                 }
-                                .disabled(isInLibrary || isAdding)
-                                .buttonStyle(PlainButtonStyle())
-                                .scaleEffect(isAdding ? 1.2 : 1.0)
-                                .animation(.easeInOut(duration: 0.2), value: isAdding)
-                            }
-                            .listRowBackground(Color.clear)
-                            .contentShape(Rectangle()) // Make the row tappable
-                            .onTapGesture {
-                                // Play the song when tapping anywhere on the row (doesn't add to library)
-                                player.playFromQobuz(track: track)
                             }
                         }
                     }
+                } else {
+                    Spacer()
                 }
             }
             .navigationTitle("Search")
-            .onAppear {
-                filteredLibrary = libraryManager.searchSongs(query: query)
-            }
         }
     }
 }

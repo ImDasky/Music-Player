@@ -265,6 +265,9 @@ class DownloadManager: ObservableObject {
                     song.downloadStatus = DownloadStatus.downloaded.rawValue
                     song.fileSize = response?.expectedContentLength ?? 0
                     
+                    // Extract metadata from FLAC file
+                    FLACMetadataExtractor.extractMetadata(from: localURL, for: song)
+                    
                     // Get duration using AVFoundation
                     self?.getAudioDuration(for: song, at: localURL)
                     
@@ -327,6 +330,9 @@ class DownloadManager: ObservableObject {
                     song.localFilePath = localURL.path
                     song.downloadStatus = DownloadStatus.downloaded.rawValue
                     song.fileSize = response?.expectedContentLength ?? 0
+                    
+                    // Extract metadata from file
+                    FLACMetadataExtractor.extractMetadata(from: localURL, for: song)
                     
                     // Get duration using AVFoundation
                     self?.getAudioDuration(for: song, at: localURL)
