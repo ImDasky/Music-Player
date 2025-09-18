@@ -61,8 +61,43 @@ struct QobuzTrack: Decodable {
 final class MusicPlayer: ObservableObject {
     @Published var currentSong: Any? = nil // Can be Song or TempSong
     @Published var isPlaying: Bool = false
-    @Published var queue: [Song] = []
+    @Published var queue: [Song] = [] // Play order (used by UI / Up Next)
+    private var baseQueue: [Song] = [] // Original order (recently added desc)
     @Published var currentIndex: Int? = nil
+    @Published var isShuffling: Bool = false
+    @Published var repeatMode: RepeatMode = .off
+
+    enum RepeatMode { case off, one, all }
+
+    private func rebuildPlayQueue(preserving current: Song?) {
+        // Build play queue from base according to shuffle state
+        if isShuffling {
+            var shuffled = baseQueue.shuffled()
+            // Ensure current stays in queue
+            if let current, let idx = shuffled.firstIndex(of: current) {
+                // Keep as-is, we'll set currentIndex below
+                queue = shuffled
+                currentIndex = idx
+            } else {
+                queue = shuffled
+                currentIndex = nil
+            }
+        } else {
+            queue = baseQueue
+            if let current, let idx = baseQueue.firstIndex(of: current) {
+                currentIndex = idx
+            } else {
+                currentIndex = nil
+            }
+        }
+    }
+
+    func toggleShuffle() {
+        // Preserve currently playing library song if any
+        let currentLibrarySong = currentSong as? Song
+        isShuffling.toggle()
+        rebuildPlayQueue(preserving: currentLibrarySong)
+    }
 
     func play(song: Song) {
         currentSong = song
@@ -74,9 +109,12 @@ final class MusicPlayer: ObservableObject {
             let request: NSFetchRequest<Song> = Song.fetchRequest()
             request.sortDescriptors = [NSSortDescriptor(key: "dateAdded", ascending: false)]
             let all = (try? context.fetch(request)) ?? []
-            queue = all
+            baseQueue = all
+            rebuildPlayQueue(preserving: song)
+        } else {
+            // Ensure index aligns with current play queue
+            if let idx = queue.firstIndex(of: song) { currentIndex = idx }
         }
-        if let idx = queue.firstIndex(of: song) { currentIndex = idx }
     }
     
     func play(tempSong: TempSong) {
@@ -100,19 +138,58 @@ final class MusicPlayer: ObservableObject {
     }
     
     func skipNext() {
-        guard let idx = currentIndex, idx + 1 < queue.count else { return }
-        let next = queue[idx + 1]
-        currentIndex = idx + 1
-        play(song: next)
+        guard !queue.isEmpty else { return }
+        if repeatMode == .one {
+            AudioPlayer.shared.seek(to: 0)
+            AudioPlayer.shared.resume()
+            return
+        }
+        if let idx = currentIndex {
+            if isShuffling {
+                // pick a random different index
+                if queue.count == 1 {
+                    play(song: queue[0]); currentIndex = 0; return
+                }
+                var newIndex = idx
+                while newIndex == idx { newIndex = Int.random(in: 0..<queue.count) }
+                currentIndex = newIndex
+                play(song: queue[newIndex])
+            } else {
+                let nextIndex = idx + 1
+                if nextIndex < queue.count {
+                    currentIndex = nextIndex
+                    play(song: queue[nextIndex])
+                } else if repeatMode == .all {
+                    currentIndex = 0
+                    play(song: queue[0])
+                }
+            }
+        }
     }
     
     func skipPrevious(currentTime: TimeInterval) {
+        if repeatMode == .one {
+            AudioPlayer.shared.seek(to: 0)
+            AudioPlayer.shared.resume()
+            return
+        }
         if currentTime > 3 { AudioPlayer.shared.seek(to: 0); return }
+        guard !queue.isEmpty else { AudioPlayer.shared.seek(to: 0); return }
         guard let idx = currentIndex else { AudioPlayer.shared.seek(to: 0); return }
-        if idx - 1 >= 0 {
+        if isShuffling {
+            if queue.count == 1 { play(song: queue[0]); currentIndex = 0; return }
+            var newIndex = idx
+            while newIndex == idx { newIndex = Int.random(in: 0..<queue.count) }
+            currentIndex = newIndex
+            play(song: queue[newIndex])
+        } else if idx - 1 >= 0 {
             let prev = queue[idx - 1]
             currentIndex = idx - 1
             play(song: prev)
+        } else if repeatMode == .all {
+            let lastIndex = max(queue.count - 1, 0)
+            currentIndex = lastIndex
+            play(song: queue[lastIndex])
         } else {
             AudioPlayer.shared.seek(to: 0)
         }
@@ -405,10 +482,6 @@ struct NowPlayingBar: View {
                 Spacer()
 
                 HStack(spacing: 16) {
-                    Button(action: { skipBackward() }) {
-                        Image(systemName: "backward.fill")
-                            .foregroundColor(.white)
-                    }
                     Button(action: { audio.isPlaying ? AudioPlayer.shared.pause() : AudioPlayer.shared.resume() }) {
                         Image(systemName: audio.isPlaying ? "pause.fill" : "play.fill")
                             .foregroundColor(.white)
@@ -443,11 +516,9 @@ struct FullPlayerView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @State private var isScrubbing = false
     @State private var tempTime: Double = 0
-    @State private var isShuffling = false
-    @State private var repeatMode: RepeatMode = .off
     @State private var showUpNext = false
 
-    enum RepeatMode { case off, one, all }
+    // Use MusicPlayer's repeat mode
 
     private func format(_ t: TimeInterval) -> String {
         guard t.isFinite && !t.isNaN else { return "0:00" }
@@ -459,44 +530,46 @@ struct FullPlayerView: View {
     private func skipBackward() { player.skipPrevious(currentTime: audio.currentTime) }
 
     var body: some View {
-        ScrollView(.vertical, showsIndicators: true) {
-            VStack(spacing: 16) {
-                VStack(spacing: 10) {
-                    Capsule().fill(Color.white.opacity(0.25)).frame(width: 40, height: 5).padding(.top, 8)
+                    VStack(spacing: 20) {
+                Capsule().fill(Color.white.opacity(0.25)).frame(width: 40, height: 5).padding(.top, 8)
 
-                    // Artwork
-                    if let song = player.currentSong as? Song {
-                        LocalArtworkView(song: song, size: 300)
-                            .frame(width: 300, height: 300)
-                            .cornerRadius(16)
-                            .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 12)
-                    } else if let tempSong = player.currentSong as? TempSong, let art = tempSong.artwork, let url = URL(string: art) {
-                        AsyncImage(url: url) { phase in
-                            if let image = phase.image {
-                                image.resizable().scaledToFill()
-                            } else if phase.error != nil {
-                                Image(systemName: "exclamationmark.triangle").resizable().scaledToFit().foregroundColor(.gray)
-                            } else {
-                                Image(systemName: "music.note").resizable().scaledToFit().foregroundColor(.gray)
-                            }
-                        }
+                // Artwork
+                if let song = player.currentSong as? Song {
+                    LocalArtworkView(song: song, size: 300)
                         .frame(width: 300, height: 300)
                         .cornerRadius(16)
                         .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 12)
+                        .offset(y: -70)
+                } else if let tempSong = player.currentSong as? TempSong, let art = tempSong.artwork, let url = URL(string: art) {
+                    AsyncImage(url: url) { phase in
+                        if let image = phase.image {
+                            image.resizable().scaledToFill()
+                        } else if phase.error != nil {
+                            Image(systemName: "exclamationmark.triangle").resizable().scaledToFit().foregroundColor(.gray)
+                        } else {
+                            Image(systemName: "music.note").resizable().scaledToFit().foregroundColor(.gray)
+                        }
                     }
+                    .frame(width: 300, height: 300)
+                    .cornerRadius(16)
+                    .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 12)
+                    .offset(y: -70)
                 }
-                .padding(.top, -100)
 
                 // Titles
-                VStack(spacing: 4) {
+                VStack(alignment: .leading, spacing: 4) {
                     if let song = player.currentSong as? Song {
-                        Text(song.title ?? "Unknown Title").font(.title2).fontWeight(.semibold).foregroundColor(.white)
+                        Text(song.title ?? "Unknown Title").font(.title).fontWeight(.bold).foregroundColor(.white)
                         Text(song.artist ?? "Unknown Artist").font(.subheadline).foregroundColor(.white.opacity(0.85))
                     } else if let tempSong = player.currentSong as? TempSong {
-                        Text(tempSong.title).font(.title2).fontWeight(.semibold).foregroundColor(.white)
+                        Text(tempSong.title).font(.title).fontWeight(.bold).foregroundColor(.white)
                         Text(tempSong.artist).font(.subheadline).foregroundColor(.white.opacity(0.85))
                     }
-                }.padding(.top, 4)
+                }
+                .padding(.top, 4)
+                .padding(.leading, 20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .offset(y: -8)
 
                 // Scrubber
                 VStack(spacing: 6) {
@@ -515,38 +588,53 @@ struct FullPlayerView: View {
                     })
                 }
                 .padding(.horizontal)
+                .padding(.top, 6)
 
                 // Playback controls
-                HStack(spacing: 28) {
-                    Button(action: { isShuffling.toggle() }) {
-                        Image(systemName: "shuffle").foregroundColor(isShuffling ? .white : .white.opacity(0.6))
+                HStack(spacing: 32) {
+                    Button(action: { player.toggleShuffle() }) {
+                        Image(systemName: "shuffle")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(player.isShuffling ? .white : .white.opacity(0.6))
                     }
                     Button(action: { skipBackward() }) {
-                        Image(systemName: "backward.fill").foregroundColor(.white)
+                        Image(systemName: "backward.fill")
+                            .font(.system(size: 24, weight: .medium))
+                            .foregroundColor(.white)
                     }
                     Button(action: {
                         if audio.isPlaying { AudioPlayer.shared.pause() } else { AudioPlayer.shared.resume() }
                     }) {
                         Image(systemName: audio.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.system(size: 34, weight: .bold))
+                            .font(.system(size: 40, weight: .bold))
                             .foregroundColor(.white)
                     }
                     Button(action: { skipForward() }) {
-                        Image(systemName: "forward.fill").foregroundColor(.white)
+                        Image(systemName: "forward.fill")
+                            .font(.system(size: 24, weight: .medium))
+                            .foregroundColor(.white)
                     }
                     Button(action: {
-                        switch repeatMode { case .off: repeatMode = .one; case .one: repeatMode = .all; case .all: repeatMode = .off }
+                        switch player.repeatMode { case .off: player.repeatMode = .one; case .one: player.repeatMode = .all; case .all: player.repeatMode = .off }
                     }) {
-                        let symbol: String = (repeatMode == .off ? "repeat" : (repeatMode == .one ? "repeat.1" : "repeat"))
-                        Image(systemName: symbol).foregroundColor(repeatMode == .off ? .white.opacity(0.6) : .white)
+                        let symbol: String = (player.repeatMode == .off ? "repeat" : (player.repeatMode == .one ? "repeat.1" : "repeat"))
+                        Image(systemName: symbol)
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(player.repeatMode == .off ? .white.opacity(0.6) : .white)
                     }
                 }
                 .font(.title2)
 
-                // Volume
-                VolumeView()
-                    .frame(height: 36)
+                // Volume (custom bar) above Up Next
+                VolumeBar(value: Binding(get: { AudioPlayer.shared.volume }, set: { AudioPlayer.shared.setVolume($0) }))
                     .padding(.horizontal)
+                    .padding(.top, 10)
+
+                // Volume
+                // Keeping system VolumeView hidden to preserve hardware control behavior if needed
+                VolumeView()
+                    .frame(height: 0)
+                    .opacity(0)
 
                 // Up Next / Options row
                 HStack {
@@ -569,20 +657,69 @@ struct FullPlayerView: View {
                 }
                 .padding(.horizontal)
 
-                // Extra bottom space to allow scrolling further
-                Color.clear.frame(height: 300)
             }
-            .padding(.top, 140)
-        }
-        .padding(.bottom, 20)
-        .background(Color.black.ignoresSafeArea())
-        .sheet(isPresented: $showUpNext) {
-            UpNextView().environmentObject(player)
-        }
+            .padding(.top, 120)
+            .overlay(alignment: .top) {
+                Capsule()
+                    .fill(Color.white.opacity(0.25))
+                    .frame(width: 40, height: 5)
+                    .padding(.top, 8)
+            }
+            .padding(.bottom, 20)
+            .background(Color.black.ignoresSafeArea())
+            .sheet(isPresented: $showUpNext) {
+                UpNextView().environmentObject(player)
+            }
     }
 }
 
-// Volume slider wrapper
+// Custom volume bar matching scrubber aesthetic
+struct VolumeBar: View {
+    @Binding var value: Float
+    @State private var isDragging = false
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: "speaker.fill")
+                .foregroundColor(.white.opacity(0.6))
+                .font(.system(size: 14, weight: .regular))
+
+            GeometryReader { geo in
+                ZStack {
+                    VStack {
+                        Spacer()
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Color.white.opacity(0.2)).frame(height: 6)
+                            Capsule().fill(Color.white.opacity(0.6))
+                                .frame(width: max(0, min(CGFloat(value) * geo.size.width, geo.size.width)), height: 6)
+                        }
+                        Spacer()
+                    }
+                }
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0)
+                    .onChanged { g in
+                        isDragging = true
+                        let x = max(0, min(g.location.x, geo.size.width))
+                        let ratio = (geo.size.width > 0 ? x / geo.size.width : 0)
+                        value = Float(ratio)
+                    }
+                    .onEnded { _ in
+                        isDragging = false
+                    }
+                )
+            }
+            .frame(height: 28)
+
+            Image(systemName: "speaker.wave.3.fill")
+                .foregroundColor(.white.opacity(0.6))
+                .font(.system(size: 14, weight: .regular))
+        }
+        .frame(height: 28)
+    }
+}
+
+// MARK: - Volume slider wrapper
 struct VolumeView: UIViewRepresentable {
     func makeUIView(context: Context) -> MPVolumeView { MPVolumeView(frame: .zero) }
     func updateUIView(_ view: MPVolumeView, context: Context) {}
@@ -607,8 +744,8 @@ struct LineScrubber: View {
         VStack(spacing: 6) {
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(Color.white.opacity(0.25)).frame(height: 3)
-                    Capsule().fill(Color.white).frame(width: progressWidth(total: geo.size.width), height: 3)
+                    Capsule().fill(Color.white.opacity(0.25)).frame(height: 5)
+                    Capsule().fill(Color.white).frame(width: progressWidth(total: geo.size.width), height: 5)
                 }
                 .contentShape(Rectangle())
                 .gesture(DragGesture(minimumDistance: 0)
@@ -625,7 +762,7 @@ struct LineScrubber: View {
                     }
                 )
             }
-            .frame(height: 20)
+            .frame(height: 28)
 
             HStack {
                 Text(format(currentTime)).font(.caption2).foregroundColor(.white.opacity(0.8))
@@ -912,6 +1049,7 @@ struct SearchView: View {
     @State private var filteredLibrary: [Song] = []
     @State private var addedSongs: Set<String> = [] // Track which songs were just added
     @State private var addingSongs: Set<String> = [] // Track which songs are currently being added
+    @State private var showPicker: Bool = false
 
     var body: some View {
         NavigationView {
@@ -924,14 +1062,22 @@ struct SearchView: View {
                     .padding(.horizontal)
                     .focused($searchFocused)
                     .onChange(of: query) { newValue in
+                        withAnimation(.easeOut(duration: 0.35)) {
+                            showPicker = searchFocused || !newValue.isEmpty
+                        }
                         if mode == .newMusic, !newValue.isEmpty {
                             qobuzAPI.search(query: newValue)
                         } else {
                             filteredLibrary = libraryManager.searchSongs(query: newValue)
                         }
                     }
+                    .onChange(of: searchFocused) { focused in
+                        withAnimation(.easeOut(duration: 0.35)) {
+                            showPicker = focused || !query.isEmpty
+                        }
+                    }
 
-                if searchFocused || !query.isEmpty {
+                if showPicker {
                     Picker("", selection: $mode) {
                         ForEach(SearchMode.allCases, id: \.self) { mode in
                             Text(mode.rawValue).tag(mode)
@@ -939,8 +1085,10 @@ struct SearchView: View {
                     }
                     .pickerStyle(SegmentedPickerStyle())
                     .padding(.horizontal)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .animation(.easeInOut(duration: 0.3), value: searchFocused || !query.isEmpty)
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .top).combined(with: .opacity),
+                        removal: .move(edge: .top).combined(with: .opacity)
+                    ))
                     .onChange(of: mode) { newValue in
                         if newValue == .library {
                             filteredLibrary = libraryManager.searchSongs(query: query)

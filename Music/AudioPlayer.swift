@@ -18,6 +18,7 @@ class AudioPlayer: NSObject, ObservableObject {
     @Published var currentTime: TimeInterval = 0
     @Published var duration: TimeInterval = 0
     @Published var audioQuality: AudioQuality = .high
+    @Published var volume: Float = 1.0
     
     private var player: AVPlayer?
     private var timeObserver: Any?
@@ -56,6 +57,8 @@ class AudioPlayer: NSObject, ObservableObject {
         setupHighQualityAudioSession()
         setupRemoteCommandCenter()
         observeInterruptions()
+        // Initialize default volume
+        setVolume(volume)
     }
     
     private func setupHighQualityAudioSession() {
@@ -336,6 +339,16 @@ class AudioPlayer: NSObject, ObservableObject {
         updateNowPlayingInfo()
     }
     
+    func setVolume(_ value: Float) {
+        // Clamp value between 0 and 1
+        let clamped = max(0.0, min(value, 1.0))
+        volume = clamped
+        // AVPlayer volume
+        player?.volume = clamped
+        // AVAudioEngine main mixer volume (if using HQ path)
+        audioEngine?.mainMixerNode.outputVolume = clamped
+    }
+
     func stop() {
         // Stop high-quality engine
         audioEngine?.stop()
@@ -461,7 +474,7 @@ class AudioPlayer: NSObject, ObservableObject {
     }
     
     private struct AssociatedKeys { static var fallbackURLKey = "fallbackURLKey" }
-
+    
     override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
         if keyPath == "status" {
             if let playerItem = object as? AVPlayerItem {
@@ -479,7 +492,7 @@ class AudioPlayer: NSObject, ObservableObject {
                         print("Retrying playback with fallback URL: \(fb.absoluteString)")
                         playWithAVPlayer(url: fb, fallbackURL: nil)
                     } else {
-                        isPlaying = false
+                    isPlaying = false
                         updateNowPlayingInfo()
                     }
                 case .unknown:
