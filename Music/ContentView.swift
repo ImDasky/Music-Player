@@ -550,6 +550,7 @@ struct SongsRootView: View {
 struct GenresView: View { var body: some View { Text("Genres").foregroundColor(.white); Spacer() } }
 
 struct RecentlyPlayedView: View {
+    @EnvironmentObject var player: MusicPlayer
     @FetchRequest(
         sortDescriptors: [NSSortDescriptor(keyPath: \Song.dateAdded, ascending: false)],
         animation: .default)
@@ -572,6 +573,8 @@ struct RecentlyPlayedView: View {
                             Text(song.title ?? "Unknown").lineLimit(1).font(.caption).foregroundColor(.white)
                             Text(song.artist ?? "Unknown").lineLimit(1).font(.caption2).foregroundColor(.white.opacity(0.7))
                         }
+                        .contentShape(Rectangle())
+                        .onTapGesture { player.play(song: song) }
                     }
                 }
                 .padding(.horizontal)
