@@ -55,8 +55,7 @@ final class MusicPlayer: ObservableObject {
     func play(song: Song) {
         currentSong = song
         AudioPlayer.shared.play(song: song)
-        isPlaying = true
-        RecentlyPlayedStore.shared.record(song.id)
+        // isPlaying will be reflected by AudioPlayer.shared.isPlaying
     }
     
     func playFromQobuz(track: QobuzTrack) {
@@ -69,7 +68,7 @@ final class MusicPlayer: ObservableObject {
             do {
                 let player = try AVAudioPlayer(contentsOf: url)
                 player.play()
-                isPlaying = true
+                // AudioPlayer.shared manages actual playback elsewhere; this temp approach does not set isPlaying here
             } catch {
                 print("Error playing Qobuz track: \(error)")
             }
@@ -77,12 +76,10 @@ final class MusicPlayer: ObservableObject {
     }
     
     func togglePlayPause() {
-        if isPlaying {
+        if AudioPlayer.shared.isPlaying {
             AudioPlayer.shared.pause()
-            isPlaying = false
         } else {
             AudioPlayer.shared.resume()
-            isPlaying = true
         }
     }
 }
@@ -293,6 +290,7 @@ struct ContentView: View {
 struct NowPlayingBar: View {
     @EnvironmentObject var player: MusicPlayer
     @State private var showFullPlayer = false
+    @ObservedObject private var audio = AudioPlayer.shared
 
     private let blurStyle: UIBlurEffect.Style = .systemChromeMaterialDark
 
@@ -348,8 +346,8 @@ struct NowPlayingBar: View {
                 Spacer()
 
                 HStack(spacing: 16) {
-                    Button(action: { player.togglePlayPause() }) {
-                        Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
+                    Button(action: { audio.isPlaying ? AudioPlayer.shared.pause() : AudioPlayer.shared.resume() }) {
+                        Image(systemName: audio.isPlaying ? "pause.fill" : "play.fill")
                             .foregroundColor(.white)
                     }
                     Button(action: {}) {

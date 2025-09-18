@@ -248,9 +248,8 @@ class AudioPlayer: NSObject, ObservableObject {
         // Add observer for playback status
         playerItem.addObserver(self, forKeyPath: "status", options: [.new], context: nil)
         
-        // Start playing
+        // Start playing (will actually start when ready)
         player?.play()
-        isPlaying = true
         
         // Get duration
         let duration = playerItem.asset.duration
@@ -418,9 +417,12 @@ class AudioPlayer: NSObject, ObservableObject {
                 switch playerItem.status {
                 case .readyToPlay:
                     print("Audio is ready to play")
+                    isPlaying = true
+                    updateNowPlayingInfo()
                 case .failed:
                     print("Audio playback failed: \(playerItem.error?.localizedDescription ?? "Unknown error")")
                     isPlaying = false
+                    updateNowPlayingInfo()
                 case .unknown:
                     print("Audio status unknown")
                 @unknown default:
