@@ -592,7 +592,8 @@ struct FullPlayerView: View {
                 }
                 .padding(.top, 4)
                 .padding(.leading, 20)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 .offset(y: -8)
 
                 // Scrubber
@@ -670,9 +671,11 @@ struct FullPlayerView: View {
                 HStack {
                     Button(action: { showUpNext.toggle() }) {
                         HStack(spacing: 8) {
+                            // Animate bubble layout when selection changes
                             Image(systemName: "text.line.first.and.arrowtriangle.forward").foregroundColor(.white)
                             Text("Up Next").foregroundColor(.white)
                         }
+                        .padding(.leading, 24)
                     }
                     Spacer()
                     Menu {
@@ -719,6 +722,7 @@ struct VolumeBar: View {
                     VStack {
                         Spacer()
                         ZStack(alignment: .leading) {
+                    // Animate the entire ZStack content changes
                             Capsule().fill(Color.white.opacity(0.2)).frame(height: 6)
                             Capsule().fill(Color.white.opacity(0.6))
                                 .frame(width: max(0, min(CGFloat(value) * geo.size.width, geo.size.width)), height: 6)
@@ -774,6 +778,7 @@ struct LineScrubber: View {
         VStack(spacing: 6) {
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
+                    // Animate the entire ZStack content changes
                     Capsule().fill(Color.white.opacity(0.25)).frame(height: 5)
                     Capsule().fill(Color.white).frame(width: progressWidth(total: geo.size.width), height: 5)
                 }
@@ -1104,33 +1109,50 @@ enum SearchMode: String, CaseIterable {
     case newMusic = "New Music"
 }
 
+enum SearchContentType: String, CaseIterable {
+    case track = "Track"
+    case artist = "Artist" 
+    case album = "Album"
+}
+
 struct SearchView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @EnvironmentObject var player: MusicPlayer
     @EnvironmentObject var libraryManager: LibraryManager
     @StateObject private var qobuzAPI = QobuzAPI()
 
+    @State private var contentType: SearchContentType = .track
+    @State private var isSearching = false
+    @State private var showPicker: Bool = false
     @State private var query = ""
     @State private var mode: SearchMode = .library
     @FocusState private var searchFocused: Bool
     @State private var filteredLibrary: [Song] = []
     @State private var addedSongs: Set<String> = [] // Track which songs were just added
     @State private var addingSongs: Set<String> = [] // Track which songs are currently being added
-    @State private var showPicker: Bool = false
 
     var body: some View {
         NavigationView {
             VStack(spacing: 12) {
                 TextField("Search", text: $query)
                     .padding(10)
-                    .background(Color(white: 0.06).opacity(0.08))
+                    .background(Color(white: 0.15).opacity(0.9))
                     .cornerRadius(10)
                     .foregroundColor(.white)
                     .padding(.horizontal)
                     .focused($searchFocused)
-                    .onChange(of: query) { newValue in
+                    .onSubmit {
                         withAnimation(.easeOut(duration: 0.35)) {
-                            showPicker = searchFocused || !newValue.isEmpty
+                            isSearching = true
+                            showPicker = false
+                        }
+                        searchFocused = false
+                    }
+                    .onChange(of: query) { newValue in
+                        if !isSearching {
+                            withAnimation(.easeOut(duration: 0.35)) {
+                                showPicker = searchFocused || !newValue.isEmpty
+                            }
                         }
                         if mode == .newMusic, !newValue.isEmpty {
                             qobuzAPI.search(query: newValue)
@@ -1139,31 +1161,59 @@ struct SearchView: View {
                         }
                     }
                     .onChange(of: searchFocused) { focused in
-                        withAnimation(.easeOut(duration: 0.35)) {
-                            showPicker = focused || !query.isEmpty
+                        if focused {
+                            withAnimation(.easeOut(duration: 0.35)) {
+                                isSearching = false
+                                showPicker = true
+                            }
+                        } else if !isSearching {
+                            withAnimation(.easeOut(duration: 0.35)) {
+                                showPicker = !query.isEmpty
+                            }
                         }
                     }
-
-                if showPicker {
-                    Picker("", selection: $mode) {
-                        ForEach(SearchMode.allCases, id: \.self) { mode in
-                            Text(mode.rawValue).tag(mode)
+                // Segmented picker or bubbles occupy same space
+                ZStack(alignment: .leading) {
+                    // Animate the entire ZStack content changes
+                    if showPicker {
+                        Picker("", selection: $mode) {
+                            ForEach(SearchMode.allCases, id: \.self) { mode in
+                                Text(mode.rawValue).tag(mode)
+                            }
                         }
+                        .pickerStyle(SegmentedPickerStyle())
+                        .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .move(edge: .top).combined(with: .opacity)))
                     }
-                    .pickerStyle(SegmentedPickerStyle())
-                    .padding(.horizontal)
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .top).combined(with: .opacity),
-                        removal: .move(edge: .top).combined(with: .opacity)
-                    ))
-                    .onChange(of: mode) { newValue in
-                        if newValue == .library {
-                            filteredLibrary = libraryManager.searchSongs(query: query)
-                        } else if !query.isEmpty {
-                            qobuzAPI.search(query: query)
+                    if isSearching {
+                        HStack(spacing: 8) {
+                            ForEach(SearchContentType.allCases, id: \.self) { type in
+                                Button(action: {
+                                    withAnimation(.easeInOut(duration: 0.22)) { contentType = type }
+                                }) {
+                                    Text(type.rawValue)
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundColor(contentType == type ? .black : .white)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 6)
+                                        .background(
+                                            RoundedRectangle(cornerRadius: 14)
+                                                .fill(contentType == type ? Color.white : Color.white.opacity(0.2))
+                                        )
+                                }
+                                .scaleEffect(contentType == type ? 1.0 : 0.96)
+                                .animation(.spring(response: 0.28, dampingFraction: 0.85), value: contentType)
+                                .buttonStyle(PlainButtonStyle())
+                            }
                         }
+                        .padding(.leading, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity), removal: .move(edge: .bottom).combined(with: .opacity)))
                     }
                 }
+                .animation(.easeInOut(duration: 0.35), value: showPicker || isSearching)
+                .frame(height: 34)
+                .padding(.horizontal)
+
 
                 List {
                     if mode == .library {
