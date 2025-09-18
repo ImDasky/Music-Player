@@ -694,8 +694,10 @@ struct SongsRootView: View {
         sortDescriptors: [NSSortDescriptor(keyPath: \Song.dateAdded, ascending: false)],
         animation: .default)
     private var songs: FetchedResults<Song>
-
+    
     private var recentlyAdded: [Song] { Array(songs.prefix(12)) }
+    
+    @EnvironmentObject var player: MusicPlayer
 
     var body: some View {
         ScrollView {
@@ -710,6 +712,8 @@ struct SongsRootView: View {
                                 Text(song.artist ?? "Unknown").lineLimit(1).font(.caption2).foregroundColor(.white.opacity(0.7))
                             }
                             .padding(.horizontal, 4)
+                            .contentShape(Rectangle())
+                            .onTapGesture { player.play(song: song) }
                         }
                     }
                     .padding(.horizontal)
