@@ -475,7 +475,7 @@ struct LocalArtworkView: View {
 }
 
 // MARK: - Library (Apple Music style hub)
-enum LibrarySection: String, CaseIterable { case playlists = "Playlists", artists = "Artists", albums = "Albums", songs = "Songs", downloaded = "Downloaded" }
+enum LibrarySection: String, CaseIterable { case songs = "Songs", playlists = "Playlists", genres = "Genres", recentlyPlayed = "Recently Played" }
 
 struct LibraryView: View {
     @Environment(\.managedObjectContext) private var viewContext
@@ -493,11 +493,10 @@ struct LibraryView: View {
 
                 Group {
                     switch selection {
-                    case .playlists: PlaylistsView()
-                    case .artists: ArtistsView()
-                    case .albums: AlbumsView()
                     case .songs: SongsRootView()
-                    case .downloaded: DownloadedView()
+                    case .playlists: PlaylistsView()
+                    case .genres: GenresView()
+                    case .recentlyPlayed: RecentlyPlayedView()
                     }
                 }
             }
@@ -506,20 +505,15 @@ struct LibraryView: View {
     }
 }
 
-// MARK: - Songs Root View (with Recently Added/Played)
+// MARK: - Songs Root View (Recently Added only)
 struct SongsRootView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @FetchRequest(
         sortDescriptors: [NSSortDescriptor(keyPath: \Song.dateAdded, ascending: false)],
         animation: .default)
     private var songs: FetchedResults<Song>
-    @ObservedObject private var recents = RecentlyPlayedStore.shared
 
     private var recentlyAdded: [Song] { Array(songs.prefix(12)) }
-    private var recentlyPlayed: [Song] {
-        let map = Dictionary(uniqueKeysWithValues: songs.compactMap { s in (s.id.map { ($0, s) }) })
-        return recents.items.compactMap { map[$0] }
-    }
 
     var body: some View {
         ScrollView {
@@ -539,23 +533,6 @@ struct SongsRootView: View {
                     .padding(.horizontal)
                 }
 
-                if !recentlyPlayed.isEmpty {
-                    Text("Recently Played").font(.title2).bold().foregroundColor(.white).padding(.horizontal)
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 14) {
-                            ForEach(recentlyPlayed) { song in
-                                VStack(alignment: .leading, spacing: 6) {
-                                    LocalArtworkView(song: song, size: 140)
-                                    Text(song.title ?? "Unknown").lineLimit(1).font(.caption).foregroundColor(.white)
-                                    Text(song.artist ?? "Unknown").lineLimit(1).font(.caption2).foregroundColor(.white.opacity(0.7))
-                                }
-                                .frame(width: 140)
-                            }
-                        }
-                        .padding(.horizontal)
-                    }
-                }
-
                 // Full list
                 VStack(alignment: .leading, spacing: 8) {
                     Text("All Songs").font(.headline).foregroundColor(.white).padding(.horizontal)
@@ -563,6 +540,41 @@ struct SongsRootView: View {
                         SongRow(song: song)
                     }
                 }
+            }
+            .padding(.top, 12)
+        }
+    }
+}
+
+// MARK: - Genres and Recently Played Views
+struct GenresView: View { var body: some View { Text("Genres").foregroundColor(.white); Spacer() } }
+
+struct RecentlyPlayedView: View {
+    @FetchRequest(
+        sortDescriptors: [NSSortDescriptor(keyPath: \Song.dateAdded, ascending: false)],
+        animation: .default)
+    private var songs: FetchedResults<Song>
+    @ObservedObject private var recents = RecentlyPlayedStore.shared
+
+    private var recentlyPlayed: [Song] {
+        let map = Dictionary(uniqueKeysWithValues: songs.compactMap { s in (s.id.map { ($0, s) }) })
+        return recents.items.compactMap { map[$0] }
+    }
+
+    var body: some View {
+        ScrollView(.vertical, showsIndicators: true) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Recently Played").font(.title2).bold().foregroundColor(.white).padding(.horizontal)
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 12) {
+                    ForEach(recentlyPlayed) { song in
+                        VStack(alignment: .leading, spacing: 6) {
+                            LocalArtworkView(song: song, size: 110)
+                            Text(song.title ?? "Unknown").lineLimit(1).font(.caption).foregroundColor(.white)
+                            Text(song.artist ?? "Unknown").lineLimit(1).font(.caption2).foregroundColor(.white.opacity(0.7))
+                        }
+                    }
+                }
+                .padding(.horizontal)
             }
             .padding(.top, 12)
         }
