@@ -310,8 +310,41 @@ struct NowPlayingBar: View {
     @EnvironmentObject var player: MusicPlayer
     @State private var showFullPlayer = false
     @ObservedObject private var audio = AudioPlayer.shared
+    @Environment(\.managedObjectContext) private var viewContext
 
     private let blurStyle: UIBlurEffect.Style = .systemChromeMaterialDark
+
+    private func fetchAllSongs() -> [Song] {
+        let request: NSFetchRequest<Song> = Song.fetchRequest()
+        request.sortDescriptors = [NSSortDescriptor(key: "dateAdded", ascending: false)]
+        return (try? viewContext.fetch(request)) ?? []
+    }
+
+    private func skipForward() {
+        if let current = player.currentSong as? Song {
+            let all = fetchAllSongs()
+            if let idx = all.firstIndex(of: current), idx + 1 < all.count {
+                player.play(song: all[idx + 1])
+            }
+        }
+    }
+
+    private func skipBackward() {
+        if audio.currentTime > 3 {
+            AudioPlayer.shared.seek(to: 0)
+            return
+        }
+        if let current = player.currentSong as? Song {
+            let all = fetchAllSongs()
+            if let idx = all.firstIndex(of: current), idx - 1 >= 0 {
+                player.play(song: all[idx - 1])
+            } else {
+                AudioPlayer.shared.seek(to: 0)
+            }
+        } else {
+            AudioPlayer.shared.seek(to: 0)
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -365,11 +398,15 @@ struct NowPlayingBar: View {
                 Spacer()
 
                 HStack(spacing: 16) {
+                    Button(action: { skipBackward() }) {
+                        Image(systemName: "backward.fill")
+                            .foregroundColor(.white)
+                    }
                     Button(action: { audio.isPlaying ? AudioPlayer.shared.pause() : AudioPlayer.shared.resume() }) {
                         Image(systemName: audio.isPlaying ? "pause.fill" : "play.fill")
                             .foregroundColor(.white)
                     }
-                    Button(action: {}) {
+                    Button(action: { skipForward() }) {
                         Image(systemName: "forward.fill")
                             .foregroundColor(.white)
                     }
@@ -396,6 +433,7 @@ struct NowPlayingBar: View {
 struct FullPlayerView: View {
     @EnvironmentObject var player: MusicPlayer
     @ObservedObject private var audio = AudioPlayer.shared
+    @Environment(\.managedObjectContext) private var viewContext
     @State private var isScrubbing = false
     @State private var tempTime: Double = 0
     @State private var isShuffling = false
@@ -409,6 +447,38 @@ struct FullPlayerView: View {
         let total = Int(t.rounded())
         let m = total / 60, s = total % 60
         return String(format: "%d:%02d", m, s)
+    }
+
+    private func fetchAllSongs() -> [Song] {
+        let request: NSFetchRequest<Song> = Song.fetchRequest()
+        request.sortDescriptors = [NSSortDescriptor(key: "dateAdded", ascending: false)]
+        return (try? viewContext.fetch(request)) ?? []
+    }
+
+    private func skipForward() {
+        if let current = player.currentSong as? Song {
+            let all = fetchAllSongs()
+            if let idx = all.firstIndex(of: current), idx + 1 < all.count {
+                player.play(song: all[idx + 1])
+            }
+        }
+    }
+
+    private func skipBackward() {
+        if audio.currentTime > 3 {
+            AudioPlayer.shared.seek(to: 0)
+            return
+        }
+        if let current = player.currentSong as? Song {
+            let all = fetchAllSongs()
+            if let idx = all.firstIndex(of: current), idx - 1 >= 0 {
+                player.play(song: all[idx - 1])
+            } else {
+                AudioPlayer.shared.seek(to: 0)
+            }
+        } else {
+            AudioPlayer.shared.seek(to: 0)
+        }
     }
 
     var body: some View {
@@ -472,7 +542,7 @@ struct FullPlayerView: View {
                     Button(action: { isShuffling.toggle() }) {
                         Image(systemName: "shuffle").foregroundColor(isShuffling ? .white : .white.opacity(0.6))
                     }
-                    Button(action: { /* previous placeholder */ }) {
+                    Button(action: { skipBackward() }) {
                         Image(systemName: "backward.fill").foregroundColor(.white)
                     }
                     Button(action: {
@@ -482,7 +552,7 @@ struct FullPlayerView: View {
                             .font(.system(size: 34, weight: .bold))
                             .foregroundColor(.white)
                     }
-                    Button(action: { /* next placeholder */ }) {
+                    Button(action: { skipForward() }) {
                         Image(systemName: "forward.fill").foregroundColor(.white)
                     }
                     Button(action: {
