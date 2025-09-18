@@ -753,7 +753,7 @@ struct RecentlyPlayedView: View {
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 20) {
                 Text("Recently Played").font(.title2).bold().foregroundColor(.white).padding(.horizontal)
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 12) {
                     ForEach(recentlyPlayed) { song in
