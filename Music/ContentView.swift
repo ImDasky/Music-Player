@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import CoreData
+import AVFoundation
 
 // MARK: - BlurView (UIVisualEffectView wrapper)
 struct BlurView: UIViewRepresentable {
@@ -52,18 +53,35 @@ final class MusicPlayer: ObservableObject {
 
     func play(song: Song) {
         currentSong = song
+        AudioPlayer.shared.play(song: song)
         isPlaying = true
     }
     
     func playFromQobuz(track: QobuzTrack) {
-        // Create a temporary Song object for playing (not saved to Core Data)
+        // Create a temporary Song object for playing
         let tempSong = TempSong(from: track)
         currentSong = tempSong
-        isPlaying = true
+        
+        // For Qobuz tracks, we'll stream them directly
+        if let urlString = track.url, let url = URL(string: urlString) {
+            do {
+                let player = try AVAudioPlayer(contentsOf: url)
+                player.play()
+                isPlaying = true
+            } catch {
+                print("Error playing Qobuz track: \(error)")
+            }
+        }
     }
     
     func togglePlayPause() {
-        isPlaying.toggle()
+        if isPlaying {
+            AudioPlayer.shared.pause()
+            isPlaying = false
+        } else {
+            AudioPlayer.shared.resume()
+            isPlaying = true
+        }
     }
 }
 
@@ -92,7 +110,11 @@ final class LibraryManager: ObservableObject {
             song.album = album
             song.url = url
             song.dateAdded = Date()
+            song.downloadStatus = DownloadStatus.downloading.rawValue // Start downloading immediately
             persistenceController.save()
+            
+            // Start download immediately when adding to library
+            DownloadManager.shared.downloadSong(song, context: viewContext)
             return true // Successfully added
         }
         return false // Already exists
@@ -109,6 +131,8 @@ final class LibraryManager: ObservableObject {
     }
     
     func deleteSong(_ song: Song) {
+        // Delete downloaded file if it exists
+        DownloadManager.shared.deleteDownloadedFile(for: song)
         viewContext.delete(song)
         persistenceController.save()
     }
@@ -459,8 +483,32 @@ struct LibraryView: View {
                             VStack(alignment: .leading) {
                                 Text(song.title ?? "Unknown Title").foregroundColor(.white)
                                 Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
+                                
+                                // Only show status if downloading or failed - NO OTHER STATUS
+                                if song.downloadStatus == DownloadStatus.downloading.rawValue {
+                                    HStack {
+                                        Image(systemName: "arrow.down.circle.fill")
+                                            .foregroundColor(.blue)
+                                            .font(.caption)
+                                        Text("Downloading...")
+                                            .font(.caption2)
+                                            .foregroundColor(.blue)
+                                    }
+                                } else if song.downloadStatus == DownloadStatus.failed.rawValue {
+                                    HStack {
+                                        Image(systemName: "exclamationmark.circle.fill")
+                                            .foregroundColor(.red)
+                                            .font(.caption)
+                                        Text("Failed")
+                                            .font(.caption2)
+                                            .foregroundColor(.red)
+                                    }
+                                }
+                                // NO OTHER STATUS SHOWN - downloaded songs show nothing
                             }
                             Spacer()
+                            
+                            // Play button
                             Button(action: { player.play(song: song) }) {
                                 Image(systemName: "play.fill").foregroundColor(.white)
                             }
@@ -559,8 +607,22 @@ struct SearchView: View {
                                 VStack(alignment: .leading) {
                                     Text(song.title ?? "Unknown Title").foregroundColor(.white)
                                     Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
+                                    
+                                    // Only show status if downloading or failed - NO OTHER STATUS
+                                    if song.downloadStatus == DownloadStatus.downloading.rawValue {
+                                        Text("Downloading...")
+                                            .font(.caption2)
+                                            .foregroundColor(.blue)
+                                    } else if song.downloadStatus == DownloadStatus.failed.rawValue {
+                                        Text("Failed")
+                                            .font(.caption2)
+                                            .foregroundColor(.red)
+                                    }
+                                    // NO OTHER STATUS SHOWN - downloaded songs show nothing
                                 }
                                 Spacer()
+                                
+                                // Play button
                                 Button(action: { player.play(song: song) }) {
                                     Image(systemName: "play.fill").foregroundColor(.white)
                                 }
@@ -602,7 +664,7 @@ struct SearchView: View {
                                 let wasJustAdded = addedSongs.contains(songKey)
                                 let isAdding = addingSongs.contains(songKey)
                                 
-                                // Simple plus button - back to clean styling
+                                // Add to library button (which now downloads automatically)
                                 Button(action: {
                                     if !isInLibrary && !isAdding {
                                         addingSongs.insert(songKey)

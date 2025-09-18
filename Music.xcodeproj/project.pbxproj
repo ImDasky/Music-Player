@@ -13,6 +13,8 @@
 		B56E11522E7BA6E60046E562 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B56E11512E7BA6E60046E562 /* ContentView.swift */; };
 		B56E11542E7BA6E70046E562 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B56E11532E7BA6E70046E562 /* Assets.xcassets */; };
 		B56E11582E7BA6E70046E562 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B56E11572E7BA6E70046E562 /* Preview Assets.xcassets */; };
+		B56E115C2E7BA6E80046E562 /* DownloadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B56E11592E7BA6E80046E562 /* DownloadManager.swift */; };
+		B56E115D2E7BA6E80046E562 /* AudioPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B56E115A2E7BA6E80046E562 /* AudioPlayer.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -24,6 +26,8 @@
 		B56E11532E7BA6E70046E562 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B56E11552E7BA6E70046E562 /* Music.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Music.entitlements; sourceTree = "<group>"; };
 		B56E11572E7BA6E70046E562 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
+		B56E11592E7BA6E80046E562 /* DownloadManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadManager.swift; sourceTree = "<group>"; };
+		B56E115A2E7BA6E80046E562 /* AudioPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPlayer.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -60,6 +64,8 @@
 				B56E114C2E7BA6E60046E562 /* Persistence.swift */,
 				B56E114E2E7BA6E60046E562 /* Music.xcdatamodeld */,
 				B56E11512E7BA6E60046E562 /* ContentView.swift */,
+				B56E11592E7BA6E80046E562 /* DownloadManager.swift */,
+				B56E115A2E7BA6E80046E562 /* AudioPlayer.swift */,
 				B56E11532E7BA6E70046E562 /* Assets.xcassets */,
 				B56E11552E7BA6E70046E562 /* Music.entitlements */,
 				B56E11562E7BA6E70046E562 /* Preview Content */,
@@ -149,6 +155,8 @@
 				B56E114B2E7BA6E60046E562 /* MusicApp.swift in Sources */,
 				B56E114D2E7BA6E60046E562 /* Persistence.swift in Sources */,
 				B56E11502E7BA6E60046E562 /* Music.xcdatamodeld in Sources */,
+				B56E115C2E7BA6E80046E562 /* DownloadManager.swift in Sources */,
+				B56E115D2E7BA6E80046E562 /* AudioPlayer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -304,7 +312,7 @@
 				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Debug;
 		};
@@ -338,7 +346,7 @@
 				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Release;
 		};

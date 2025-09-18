@@ -8,8 +8,12 @@
         <attribute name="album" optional="YES" attributeType="String"/>
         <attribute name="url" optional="YES" attributeType="String"/>
         <attribute name="dateAdded" optional="NO" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="localFilePath" optional="YES" attributeType="String"/>
+        <attribute name="downloadStatus" optional="NO" attributeType="String" defaultValueString="notDownloaded"/>
+        <attribute name="fileSize" optional="YES" attributeType="Integer 64" usesScalarValueType="YES"/>
+        <attribute name="duration" optional="YES" attributeType="Double" usesScalarValueType="YES"/>
     </entity>
     <elements>
-        <element name="Song" positionX="-63" positionY="-18" width="128" height="148"/>
+        <element name="Song" positionX="-63" positionY="-18" width="128" height="198"/>
     </elements>
 </model>
