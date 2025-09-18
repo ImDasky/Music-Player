@@ -24,6 +24,7 @@ class AudioPlayer: NSObject, ObservableObject {
     private var audioEngine: AVAudioEngine?
     private var audioPlayerNode: AVAudioPlayerNode?
     private var audioFile: AVAudioFile?
+    private var hqStartTimeOffset: Double = 0
     
     // High-quality audio settings
     private let sampleRate: Double = 96000.0  // 96kHz for high quality
@@ -217,7 +218,10 @@ class AudioPlayer: NSObject, ObservableObject {
             let format = file.processingFormat
             print("Audio file format - Sample Rate: \(format.sampleRate)Hz, Channels: \(format.channelCount), Bit Depth: \(format.commonFormat.rawValue)")
             
-            // Schedule the file for playback
+            // Reset base offset
+            hqStartTimeOffset = 0
+            
+            // Schedule the file for playback from start
             playerNode.scheduleFile(file, at: nil) { [weak self] in
                 DispatchQueue.main.async {
                     self?.isPlaying = false
@@ -292,10 +296,10 @@ class AudioPlayer: NSObject, ObservableObject {
                 return
             }
             
-            // Calculate current time based on player node
+            // Calculate current time based on player node plus offset
             if let lastRenderTime = playerNode.lastRenderTime,
                let playerTime = playerNode.playerTime(forNodeTime: lastRenderTime) {
-                self.currentTime = Double(playerTime.sampleTime) / playerTime.sampleRate
+                self.currentTime = self.hqStartTimeOffset + (Double(playerTime.sampleTime) / playerTime.sampleRate)
             }
         }
     }
@@ -328,6 +332,7 @@ class AudioPlayer: NSObject, ObservableObject {
         audioEngine = nil
         audioPlayerNode = nil
         audioFile = nil
+        hqStartTimeOffset = 0
         
         // Stop AVPlayer
         player?.pause()
@@ -346,20 +351,25 @@ class AudioPlayer: NSObject, ObservableObject {
             // Seek in high-quality playback using scheduleSegment for accuracy
             let sampleRate = file.processingFormat.sampleRate
             let totalFrames = AVAudioFramePosition(file.length)
-            let startFrame = AVAudioFramePosition(max(0, min(time, duration)) * sampleRate)
-            let framesToPlay = totalFrames - startFrame
+            let clampedTime = max(0, min(time, duration))
+            let startFrame = AVAudioFramePosition(clampedTime * sampleRate)
+            let framesToPlay = max(0, totalFrames - startFrame)
+            
+            // Keep engine running, just stop the node and reschedule
             playerNode.stop()
-            audioEngine?.stop()
-            do {
-                try audioEngine?.start()
-            } catch {}
-            playerNode.scheduleSegment(file, startingFrame: startFrame, frameCount: AVAudioFrameCount(max(0, framesToPlay)), at: nil) { [weak self] in
+            
+            hqStartTimeOffset = clampedTime
+            
+            playerNode.scheduleSegment(file, startingFrame: startFrame, frameCount: AVAudioFrameCount(framesToPlay), at: nil) { [weak self] in
                 DispatchQueue.main.async {
                     self?.isPlaying = false
                     self?.currentTime = 0
                 }
             }
             playerNode.play()
+            
+            // Maintain playing state
+            isPlaying = true
         } else {
             // Seek in standard AVPlayer
             let cmTime = CMTime(seconds: time, preferredTimescale: 1000)
