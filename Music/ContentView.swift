@@ -665,8 +665,6 @@ struct LibraryView: View {
 // MARK: - Songs Root View (Recently Added only)
 struct SongsRootView: View {
     @Environment(\.managedObjectContext) private var viewContext
-    @EnvironmentObject var player: MusicPlayer
-    @EnvironmentObject var libraryManager: LibraryManager
     @FetchRequest(
         sortDescriptors: [NSSortDescriptor(keyPath: \Song.dateAdded, ascending: false)],
         animation: .default)
@@ -675,10 +673,10 @@ struct SongsRootView: View {
     private var recentlyAdded: [Song] { Array(songs.prefix(12)) }
 
     var body: some View {
-        List {
-            if !recentlyAdded.isEmpty {
-                Section(header: Text("Recently Added").foregroundColor(.white)) {
-                    // Grid inside list row
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                if !recentlyAdded.isEmpty {
+                    Text("Recently Added").font(.title2).bold().foregroundColor(.white).padding(.horizontal)
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 12) {
                         ForEach(recentlyAdded) { song in
                             VStack(alignment: .leading, spacing: 6) {
@@ -686,25 +684,21 @@ struct SongsRootView: View {
                                 Text(song.title ?? "Unknown").lineLimit(1).font(.caption).foregroundColor(.white)
                                 Text(song.artist ?? "Unknown").lineLimit(1).font(.caption2).foregroundColor(.white.opacity(0.7))
                             }
+                            .padding(.horizontal, 4)
                         }
                     }
-                    .listRowBackground(Color.clear)
+                    .padding(.horizontal)
                 }
-            }
 
-            Section(header: Text("All Songs").foregroundColor(.white)) {
-                ForEach(songs) { song in
-                    SongRow(song: song)
-                        .listRowBackground(Color.clear)
-                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                            Button(role: .destructive) {
-                                libraryManager.deleteSong(song)
-                            } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
-                        }
+                // Full list
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("All Songs").font(.headline).foregroundColor(.white).padding(.horizontal)
+                    ForEach(songs) { song in
+                        SongRow(song: song)
+                    }
                 }
             }
+            .padding(.top, 12)
         }
     }
 }
@@ -750,6 +744,7 @@ struct RecentlyPlayedView: View {
 // MARK: - Song Row (simple inline for now)
 struct SongRow: View {
     @EnvironmentObject var player: MusicPlayer
+    @EnvironmentObject var libraryManager: LibraryManager
     let song: Song
 
     var body: some View {
@@ -764,6 +759,11 @@ struct SongRow: View {
         .contentShape(Rectangle())
         .onTapGesture { player.play(song: song) }
         .padding(.horizontal)
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            Button(role: .destructive) { libraryManager.deleteSong(song) } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
     }
 }
 
@@ -873,10 +873,7 @@ struct SearchView: View {
                             .onTapGesture { player.play(song: song) }
                             .listRowBackground(Color.clear)
                             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                Button(role: .destructive) {
-                                    libraryManager.deleteSong(song)
-                                    filteredLibrary.removeAll { $0.objectID == song.objectID }
-                                } label: {
+                                Button(role: .destructive) { libraryManager.deleteSong(song) } label: {
                                     Label("Delete", systemImage: "trash")
                                 }
                             }
@@ -961,4 +958,3 @@ struct SearchView: View {
         }
     }
 }
-
