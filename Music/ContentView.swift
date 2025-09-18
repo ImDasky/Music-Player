@@ -57,6 +57,31 @@ struct QobuzTrack: Decodable {
     let url: String?
 }
 
+// MARK: - Circular Progress View
+struct CircularProgressView: View {
+    let progress: Double   // 0.0 ... 1.0
+    let size: CGFloat
+    let lineWidth: CGFloat
+    
+    private var clamped: Double { max(0.0, min(1.0, progress)) }
+    private var percentText: String { "\(Int(clamped * 100))%" }
+    
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(Color.white.opacity(0.15), lineWidth: lineWidth)
+            Circle()
+                .trim(from: 0, to: clamped)
+                .stroke(Color.white, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+            Text(percentText)
+                .font(.system(size: max(10, size * 0.28), weight: .bold))
+                .foregroundColor(.white)
+        }
+        .frame(width: size, height: size)
+    }
+}
+
 // MARK: - Player + Library managers
 final class MusicPlayer: ObservableObject {
     @Published var currentSong: Any? = nil // Can be Song or TempSong
@@ -464,6 +489,7 @@ struct NowPlayingBar: View {
                 if let song = player.currentSong as? Song {
                     // Core Data Song
                     LocalArtworkView(song: song, size: 44)
+                        .id(song.objectID)
                 } else if let tempSong = player.currentSong as? TempSong {
                     // Temporary Song from Qobuz
                     if let art = tempSong.artwork, let url = URL(string: art) {
@@ -560,6 +586,7 @@ struct FullPlayerView: View {
                 // Artwork
                 if let song = player.currentSong as? Song {
                     LocalArtworkView(song: song, size: 300)
+                        .id(song.objectID)
                         .frame(width: 300, height: 300)
                         .cornerRadius(16)
                         .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 12)
@@ -869,57 +896,130 @@ struct LocalArtworkView: View {
     @ObservedObject var song: Song
     let size: CGFloat
     @State private var image: UIImage?
-
+    @State private var retryAttempts: Int = 0
+    
     var body: some View {
-        Group {
-            if let image {
-                Image(uiImage: image).resizable().scaledToFill()
-            } else if let art = song.artwork, art.hasPrefix("http"), let url = URL(string: art) {
-                AsyncImage(url: url) { phase in
-                    if let img = phase.image { img.resizable().scaledToFill() }
-                    else { Image(systemName: "music.note").resizable().foregroundColor(.gray) }
+        ZStack {
+            Group {
+                if let image {
+                    Image(uiImage: image).resizable().scaledToFill()
+                } else if let art = song.artwork, art.hasPrefix("http"), let url = URL(string: art) {
+                    AsyncImage(url: url) { phase in
+                        if let img = phase.image { img.resizable().scaledToFill() }
+                        else { Image(systemName: "music.note").resizable().foregroundColor(.gray) }
+                    }
+                } else {
+                    Image(systemName: "music.note").resizable().foregroundColor(.gray)
                 }
-            } else {
-                Image(systemName: "music.note").resizable().foregroundColor(.gray)
             }
+            .frame(width: size, height: size)
+            .clipped()
+            .cornerRadius(size < 100 ? 6 : 12)
+            
+            // Progress overlay for downloading/queued
+            ProgressOverlay(song: song, diameter: size * 0.7)
         }
-        .frame(width: size, height: size)
-        .clipped()
-        .cornerRadius(size < 100 ? 6 : 12)
         .onAppear(perform: load)
         .onChange(of: song.artwork) { _ in load() }
         .onChange(of: song.localFilePath) { _ in load() }
         .onChange(of: song.downloadStatus) { newStatus in
             if newStatus == DownloadStatus.downloaded.rawValue { load() }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .artworkUpdated)) { notif in
+            if let id = notif.userInfo?["songId"] as? UUID, id == song.id {
+                load()
+            }
+        }
     }
-
+    
     private func load() {
-        // Prefer saved local artwork path if present
-        guard let art = song.artwork, !art.isEmpty else { image = nil; return }
-        let cacheKey = NSString(string: "\(art)|\(Int(size))")
+        // Determine best local artwork path to load
+        let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        var preferredPath: String? = nil
+        if let id = song.id {
+            let defaultLocal = documentsDirectory.appendingPathComponent("Artwork", isDirectory: true).appendingPathComponent("\(id.uuidString).jpg").path
+            if FileManager.default.fileExists(atPath: defaultLocal) { preferredPath = defaultLocal }
+        }
+        if preferredPath == nil, let art = song.artwork, !art.isEmpty, !art.hasPrefix("http") {
+            preferredPath = art
+        }
+        guard let pathToLoad = preferredPath else {
+            // No local artwork available right now; retry in case it appears shortly
+            image = nil
+            scheduleRetry()
+            return
+        }
+        let cacheKey = NSString(string: "\(pathToLoad)|\(Int(size))")
         if let cached = ArtworkImageCache.shared.object(forKey: cacheKey) {
             image = cached
             return
         }
-        if art.hasPrefix("http") {
+        let fileExists = FileManager.default.fileExists(atPath: pathToLoad)
+        guard fileExists else {
+            // File may be written momentarily; retry briefly a few times
+            scheduleRetry()
             image = nil
             return
         }
-        let path = art
-        guard FileManager.default.fileExists(atPath: path) else { image = nil; return }
         let targetSize = CGSize(width: size * UIScreen.main.scale, height: size * UIScreen.main.scale)
         DispatchQueue.global(qos: .userInitiated).async {
-            let ui = downsampleImage(atPath: path, to: targetSize)
+            var ui = downsampleImage(atPath: pathToLoad, to: targetSize)
+            // Fallback to direct load if downsample failed but file exists
+            if ui == nil, let direct = UIImage(contentsOfFile: pathToLoad) {
+                ui = direct
+            }
             DispatchQueue.main.async {
                 if let ui {
                     ArtworkImageCache.shared.setObject(ui, forKey: cacheKey)
                     image = ui
+                    retryAttempts = 0
                 } else {
+                    // If decode failed, retry shortly in case file is still being finalized
                     image = nil
+                    scheduleRetry()
                 }
             }
         }
+    }
+    
+    private func scheduleRetry() {
+        guard retryAttempts < 3 else { return }
+        retryAttempts += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            load()
+        }
+    }
+}
+
+// MARK: - Progress Overlay helper
+struct ProgressOverlay: View {
+    @ObservedObject var manager = DownloadManager.shared
+    @ObservedObject var song: Song
+    let diameter: CGFloat
+    
+    private var show: Bool {
+        guard let status = song.downloadStatus else { return false }
+        return status == DownloadStatus.downloading.rawValue || status == DownloadStatus.queued.rawValue
+    }
+    
+    private var progressValue: Double {
+        guard let id = song.id, let p = manager.activeDownloads[id] else { return 0 }
+        // If totalBytes is a fake 100 from poller, percentage will be downloadedBytes/100.
+        return max(0.0, min(1.0, p.totalBytes == 0 ? 0 : Double(p.downloadedBytes) / Double(p.totalBytes)))
+    }
+    
+    var body: some View {
+        Group {
+            if show {
+                Circle()
+                    .fill(Color.black.opacity(0.35))
+                    .frame(width: diameter + 18, height: diameter + 18)
+                    .overlay(
+                        CircularProgressView(progress: progressValue, size: diameter, lineWidth: max(3, diameter * 0.08))
+                    )
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: show)
     }
 }
 
@@ -992,6 +1092,7 @@ struct SongsRootView: View {
                         ForEach(recentlyAdded) { song in
                             VStack(alignment: .leading, spacing: 6) {
                                 LocalArtworkView(song: song, size: 110)
+                                    .id(song.objectID)
                                 Text(song.title ?? "Unknown").lineLimit(1).font(.caption).foregroundColor(.white)
                                 Text(song.artist ?? "Unknown").lineLimit(1).font(.caption2).foregroundColor(.white.opacity(0.7))
                             }
@@ -1043,6 +1144,7 @@ struct RecentlyPlayedView: View {
                     ForEach(recentlyPlayed) { song in
                         VStack(alignment: .leading, spacing: 6) {
                             LocalArtworkView(song: song, size: 110)
+                                .id(song.objectID)
                             Text(song.title ?? "Unknown").lineLimit(1).font(.caption).foregroundColor(.white)
                             Text(song.artist ?? "Unknown").lineLimit(1).font(.caption2).foregroundColor(.white.opacity(0.7))
                         }
@@ -1067,6 +1169,7 @@ struct SongRow: View {
     var body: some View {
         HStack {
             LocalArtworkView(song: song, size: 44)
+                .id(song.objectID)
             VStack(alignment: .leading) {
                 Text(song.title ?? "Unknown Title").foregroundColor(.white)
                 Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))

@@ -8,6 +8,11 @@
 import Foundation
 import AVFoundation
 import CoreData
+import UIKit
+
+extension Notification.Name {
+    static let artworkUpdated = Notification.Name("artworkUpdated")
+}
 
 enum DownloadStatus: String, CaseIterable {
     case notDownloaded = "notDownloaded"
@@ -22,6 +27,7 @@ class DownloadManager: ObservableObject {
     static let shared = DownloadManager()
     
     @Published var activeDownloads: [UUID: DownloadProgress] = [:]
+    private var progressObservers: [UUID: NSKeyValueObservation] = [:]
     
     private let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
     private let musicDirectory: URL
@@ -110,6 +116,7 @@ class DownloadManager: ObservableObject {
                 print("Error checking download status: \(error)")
                 DispatchQueue.main.async {
                     song.downloadStatus = DownloadStatus.failed.rawValue
+                    if let id = song.id { self?.activeDownloads.removeValue(forKey: id) }
                     try? context.save()
                 }
                 return
@@ -118,6 +125,7 @@ class DownloadManager: ObservableObject {
             guard let data = data else {
                 DispatchQueue.main.async {
                     song.downloadStatus = DownloadStatus.failed.rawValue
+                    if let id = song.id { self?.activeDownloads.removeValue(forKey: id) }
                     try? context.save()
                 }
                 return
@@ -127,6 +135,13 @@ class DownloadManager: ObservableObject {
                 let statusResponse = try JSONDecoder().decode(DownloadStatusResponse.self, from: data)
                 
                 DispatchQueue.main.async {
+                    // Update percent progress if available
+                    if let id = song.id, let pct = statusResponse.percent {
+                        let clamped = max(0, min(100, pct))
+                        self?.activeDownloads[id] = DownloadProgress(songId: id, totalBytes: 100, downloadedBytes: Int64(clamped))
+                        song.downloadStatus = DownloadStatus.downloading.rawValue
+                    }
+                    
                     switch statusResponse.status {
                     case "queued":
                         song.downloadStatus = DownloadStatus.queued.rawValue
@@ -137,16 +152,18 @@ class DownloadManager: ObservableObject {
                         }
                         
                     case "done":
-                        // Download is complete, get the file
+                        // Download is complete on server, now fetch the file
                         if let fileURL = statusResponse.url {
                             self?.downloadCompletedFile(song: song, fileURL: fileURL, context: context)
                         } else {
                             song.downloadStatus = DownloadStatus.failed.rawValue
+                            if let id = song.id { self?.activeDownloads.removeValue(forKey: id) }
                             try? context.save()
                         }
                         
                     case "error", "failed":
                         song.downloadStatus = DownloadStatus.failed.rawValue
+                        if let id = song.id { self?.activeDownloads.removeValue(forKey: id) }
                         try? context.save()
                         
                     default:
@@ -160,6 +177,7 @@ class DownloadManager: ObservableObject {
                 print("Error decoding status response: \(error)")
                 DispatchQueue.main.async {
                     song.downloadStatus = DownloadStatus.failed.rawValue
+                    if let id = song.id { self?.activeDownloads.removeValue(forKey: id) }
                     try? context.save()
                 }
             }
@@ -193,6 +211,7 @@ class DownloadManager: ObservableObject {
         guard let url = URL(string: correctedURL) else {
             print("Invalid URL: \(correctedURL)")
             song.downloadStatus = DownloadStatus.failed.rawValue
+            if let id = song.id { activeDownloads.removeValue(forKey: id) }
             try? context.save()
             return
         }
@@ -220,8 +239,11 @@ class DownloadManager: ObservableObject {
         
         print("Attempting download (attempt \(retryCount + 1)/\(maxRetries + 1))")
         
-        session.downloadTask(with: url) { [weak self] tempURL, response, error in
+        let songId = song.id ?? UUID()
+        let task = session.downloadTask(with: url) { [weak self] tempURL, response, error in
             DispatchQueue.main.async {
+                // Remove any live progress observer for this task/song
+                self?.progressObservers[songId] = nil
                 if let error = error {
                     print("Download failed (attempt \(retryCount + 1)): \(error)")
                     
@@ -235,6 +257,7 @@ class DownloadManager: ObservableObject {
                     }
                     
                     song.downloadStatus = DownloadStatus.failed.rawValue
+                    if let id = song.id { self?.activeDownloads.removeValue(forKey: id) }
                     try? context.save()
                     return
                 }
@@ -249,6 +272,7 @@ class DownloadManager: ObservableObject {
                     }
                     
                     song.downloadStatus = DownloadStatus.failed.rawValue
+                    if let id = song.id { self?.activeDownloads.removeValue(forKey: id) }
                     try? context.save()
                     return
                 }
@@ -271,16 +295,29 @@ class DownloadManager: ObservableObject {
                     // Extract and persist embedded artwork/metadata for high quality covers
                     self?.extractAndSaveArtwork(from: localURL, for: song)
                     
+                    if let id = song.id { self?.activeDownloads.removeValue(forKey: id) }
                     try? context.save()
                     print("Download completed successfully!")
                     
                 } catch {
                     print("Error moving file: \(error)")
                     song.downloadStatus = DownloadStatus.failed.rawValue
+                    if let id = song.id { self?.activeDownloads.removeValue(forKey: id) }
                     try? context.save()
                 }
             }
-        }.resume()
+        }
+        // Observe task progress to update UI percentage while downloading
+        let obs = task.progress.observe(\.fractionCompleted, options: [.new]) { [weak self] progress, _ in
+            guard let self = self else { return }
+            DispatchQueue.main.async {
+                let pct = max(0.0, min(1.0, progress.fractionCompleted))
+                self.activeDownloads[songId] = DownloadProgress(songId: songId, totalBytes: 100, downloadedBytes: Int64(pct * 100))
+                song.downloadStatus = DownloadStatus.downloading.rawValue
+            }
+        }
+        progressObservers[songId] = obs
+        task.resume()
     }
     
     // MARK: - Legacy Download Method (for non-Qobuz songs)
@@ -530,11 +567,20 @@ class DownloadManager: ObservableObject {
     }
     
     private func extractArtworkData(from items: [AVMetadataItem]) -> Data? {
+        // Prefer items marked as artwork
+        var fallbackData: Data? = nil
         for item in items {
-            if let data = item.dataValue { return data }
-            if let data = item.value as? Data { return data }
+            if let key = item.commonKey, key == .commonKeyArtwork {
+                if let data = item.dataValue { return data }
+                if let data = item.value as? Data { return data }
+            }
+            // Record a generic data-bearing item as a last resort
+            if fallbackData == nil {
+                if let data = item.dataValue { fallbackData = data }
+                else if let data = item.value as? Data { fallbackData = data }
+            }
         }
-        return nil
+        return fallbackData
     }
     
     private func saveArtwork(data: Data, for song: Song) {
@@ -545,9 +591,18 @@ class DownloadManager: ObservableObject {
         }
         let artworkFileName = "\(song.id?.uuidString ?? UUID().uuidString).jpg"
         let artworkURL = artworkDirectory.appendingPathComponent(artworkFileName)
+        // Validate that data is a decodable image; avoid writing corrupt or non-art data
+        guard UIImage(data: data) != nil else {
+            print("Artwork data is not a valid image; skipping save")
+            return
+        }
         do {
-            try data.write(to: artworkURL)
+            try data.write(to: artworkURL, options: .atomic)
             song.artwork = artworkURL.path
+            // Notify UI listeners that artwork was updated for this song
+            if let id = song.id {
+                NotificationCenter.default.post(name: .artworkUpdated, object: nil, userInfo: ["songId": id])
+            }
         } catch {
             print("Failed to save artwork: \(error)")
         }
