@@ -415,20 +415,10 @@ class DownloadManager: ObservableObject {
                     }
                 case "done":
                     if let fileURL = statusResponse.url {
-                        // Build corrected URL using the same logic as downloadCompletedFile
-                        let fullURL: String
-                        if fileURL.hasPrefix("http://") {
-                            fullURL = fileURL.replacingOccurrences(of: "http://", with: "https://")
-                        } else if fileURL.hasPrefix("./") {
-                            fullURL = "https://us.doubledouble.top\(fileURL)"
-                        } else if fileURL.hasPrefix("/") {
-                            fullURL = "https://us.doubledouble.top\(fileURL)"
-                        } else {
-                            fullURL = fileURL
-                        }
-                        let correctedURL = fullURL.replacingOccurrences(of: "us.doubledouble.top./", with: "us.doubledouble.top/")
-                        if let finalURL = URL(string: correctedURL) {
-                            completion(.success(finalURL))
+                        let corrected = self?.correctedDownloadURL(from: fileURL)
+                        if let corrected,
+                           let maybeURL = URL(string: corrected) {
+                            self?.resolveIfStatusURL(maybeURL, completion: completion)
                         } else {
                             completion(.failure(DownloadError.invalidURL))
                         }
@@ -446,6 +436,43 @@ class DownloadManager: ObservableObject {
                 completion(.failure(error))
             }
         }.resume()
+    }
+
+    private func correctedDownloadURL(from fileURL: String) -> String {
+        let fullURL: String
+        if fileURL.hasPrefix("http://") {
+            fullURL = fileURL.replacingOccurrences(of: "http://", with: "https://")
+        } else if fileURL.hasPrefix("./") {
+            fullURL = "https://us.doubledouble.top\(fileURL)"
+        } else if fileURL.hasPrefix("/") {
+            fullURL = "https://us.doubledouble.top\(fileURL)"
+        } else {
+            fullURL = fileURL
+        }
+        return fullURL.replacingOccurrences(of: "us.doubledouble.top./", with: "us.doubledouble.top/")
+    }
+
+    private func resolveIfStatusURL(_ url: URL, completion: @escaping (Result<URL, Error>) -> Void) {
+        // If URL appears to be a status endpoint (no extension or contains /dl/), try to fetch it and extract media URL
+        if url.pathExtension.isEmpty || url.path.contains("/dl/") {
+            URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
+                if let error = error { completion(.failure(error)); return }
+                guard let data = data else { completion(.failure(DownloadError.noData)); return }
+                if let status = try? JSONDecoder().decode(DownloadStatusResponse.self, from: data), let nested = status.url {
+                    let corrected = self?.correctedDownloadURL(from: nested) ?? nested
+                    if let final = URL(string: corrected) {
+                        completion(.success(final))
+                    } else {
+                        completion(.failure(DownloadError.invalidURL))
+                    }
+                } else {
+                    // If not JSON or no nested URL, return original and let player attempt
+                    completion(.success(url))
+                }
+            }.resume()
+        } else {
+            completion(.success(url))
+        }
     }
 }
 
