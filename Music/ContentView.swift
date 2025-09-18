@@ -55,6 +55,7 @@ final class MusicPlayer: ObservableObject {
         currentSong = song
         AudioPlayer.shared.play(song: song)
         isPlaying = true
+        RecentlyPlayedStore.shared.record(song.id)
     }
     
     func playFromQobuz(track: QobuzTrack) {
@@ -303,28 +304,7 @@ struct NowPlayingBar: View {
             HStack(spacing: 12) {
                 if let song = player.currentSong as? Song {
                     // Core Data Song
-                    if let art = song.artwork, let url = URL(string: art) {
-                        AsyncImage(url: url) { phase in
-                            if let image = phase.image {
-                                image.resizable()
-                            } else if phase.error != nil {
-                                Image(systemName: "exclamationmark.triangle")
-                                    .resizable()
-                                    .foregroundColor(.gray)
-                            } else {
-                                Image(systemName: "music.note")
-                                    .resizable()
-                                    .foregroundColor(.gray)
-                            }
-                        }
-                        .frame(width: 44, height: 44)
-                        .cornerRadius(4)
-                    } else {
-                        Image(systemName: song.artwork ?? "music.note")
-                            .resizable()
-                            .frame(width: 44, height: 44)
-                            .cornerRadius(4)
-                    }
+                    LocalArtworkView(song: song, size: 44)
                 } else if let tempSong = player.currentSong as? TempSong {
                     // Temporary Song from Qobuz
                     if let art = tempSong.artwork, let url = URL(string: art) {
@@ -403,26 +383,9 @@ struct FullPlayerView: View {
             Spacer()
             
             if let song = player.currentSong as? Song {
-                // Core Data Song
-                if let art = song.artwork, let url = URL(string: art) {
-                    AsyncImage(url: url) { phase in
-                        if let image = phase.image {
-                            image.resizable().scaledToFit()
-                        } else if phase.error != nil {
-                            Image(systemName: "exclamationmark.triangle")
-                                .resizable()
-                                .scaledToFit()
-                                .foregroundColor(.gray)
-                        } else {
-                            Image(systemName: "music.note")
-                                .resizable()
-                                .scaledToFit()
-                                .foregroundColor(.gray)
-                        }
-                    }
+                LocalArtworkView(song: song, size: 260)
                     .frame(width: 260, height: 260)
                     .cornerRadius(12).padding(.vertical, 24)
-                }
 
                 Text(song.title ?? "Unknown Title")
                     .font(.title).fontWeight(.semibold).foregroundColor(.white)
@@ -468,81 +431,170 @@ struct FullPlayerView: View {
     }
 }
 
-// MARK: - LibraryView
+// MARK: - Local artwork extractor
+struct LocalArtworkView: View {
+    let song: Song
+    let size: CGFloat
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image).resizable().scaledToFill()
+            } else if let art = song.artwork, let url = URL(string: art), art.hasPrefix("http") {
+                AsyncImage(url: url) { phase in
+                    if let img = phase.image { img.resizable().scaledToFill() }
+                    else { Image(systemName: "music.note").resizable().foregroundColor(.gray) }
+                }
+            } else {
+                Image(systemName: "music.note").resizable().foregroundColor(.gray)
+            }
+        }
+        .frame(width: size, height: size)
+        .clipped()
+        .cornerRadius(size < 100 ? 6 : 12)
+        .onAppear(perform: load)
+    }
+
+    private func load() {
+        guard let path = song.localFilePath, FileManager.default.fileExists(atPath: path) else { return }
+        let asset = AVAsset(url: URL(fileURLWithPath: path))
+        if let img = extract(from: asset.commonMetadata) { image = img; return }
+        for fmt in asset.availableMetadataFormats {
+            if let img = extract(from: asset.metadata(forFormat: fmt)) { image = img; return }
+        }
+    }
+
+    private func extract(from items: [AVMetadataItem]) -> UIImage? {
+        for item in items {
+            if let data = item.dataValue, let img = UIImage(data: data) { return img }
+            if let data = item.value as? Data, let img = UIImage(data: data) { return img }
+        }
+        return nil
+    }
+}
+
+// MARK: - Library (Apple Music style hub)
+enum LibrarySection: String, CaseIterable { case playlists = "Playlists", artists = "Artists", albums = "Albums", songs = "Songs", downloaded = "Downloaded" }
+
 struct LibraryView: View {
     @Environment(\.managedObjectContext) private var viewContext
-    @EnvironmentObject var player: MusicPlayer
-    @EnvironmentObject var libraryManager: LibraryManager
-    @FetchRequest(
-        sortDescriptors: [NSSortDescriptor(keyPath: \Song.dateAdded, ascending: false)],
-        animation: .default)
-    private var songs: FetchedResults<Song>
+    @State private var selection: LibrarySection = .songs
 
     var body: some View {
         NavigationView {
-            List {
-                Section(header: Text("Songs").foregroundColor(.white)) {
-                    ForEach(songs) { song in
-                        HStack {
-                            Image(systemName: song.artwork ?? "music.note")
-                                .resizable().frame(width: 44, height: 44).cornerRadius(5)
-                            VStack(alignment: .leading) {
-                                Text(song.title ?? "Unknown Title").foregroundColor(.white)
-                                Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
-                                
-                                // Show status for downloading, queued, or failed
-                                if song.downloadStatus == DownloadStatus.downloading.rawValue {
-                                    HStack {
-                                        Image(systemName: "arrow.down.circle.fill")
-                                            .foregroundColor(.blue)
-                                            .font(.caption)
-                                        Text("Downloading...")
-                                            .font(.caption2)
-                                            .foregroundColor(.blue)
-                                    }
-                                } else if song.downloadStatus == DownloadStatus.queued.rawValue {
-                                    HStack {
-                                        Image(systemName: "clock.circle.fill")
-                                            .foregroundColor(.orange)
-                                            .font(.caption)
-                                        Text("Queued...")
-                                            .font(.caption2)
-                                            .foregroundColor(.orange)
-                                    }
-                                } else if song.downloadStatus == DownloadStatus.failed.rawValue {
-                                    HStack {
-                                        Image(systemName: "exclamationmark.circle.fill")
-                                            .foregroundColor(.red)
-                                            .font(.caption)
-                                        Text("Failed")
-                                            .font(.caption2)
-                                            .foregroundColor(.red)
-                                    }
-                                }
-                                // Downloaded songs show nothing
-                            }
-                            Spacer()
-                            
-                            // Play button
-                            Button(action: { player.play(song: song) }) {
-                                Image(systemName: "play.fill").foregroundColor(.white)
-                            }
-                        }
-                        .listRowBackground(Color.clear)
+            VStack(spacing: 0) {
+                Picker("", selection: $selection) {
+                    ForEach(LibrarySection.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(SegmentedPickerStyle())
+                .padding(.horizontal)
+                .padding(.top, 8)
+
+                Group {
+                    switch selection {
+                    case .playlists: PlaylistsView()
+                    case .artists: ArtistsView()
+                    case .albums: AlbumsView()
+                    case .songs: SongsRootView()
+                    case .downloaded: DownloadedView()
                     }
-                    .onDelete(perform: deleteSongs)
                 }
             }
             .navigationTitle("Library")
         }
     }
-    
-    private func deleteSongs(offsets: IndexSet) {
-        withAnimation {
-            offsets.map { songs[$0] }.forEach(libraryManager.deleteSong)
+}
+
+// MARK: - Songs Root View (with Recently Added/Played)
+struct SongsRootView: View {
+    @Environment(\.managedObjectContext) private var viewContext
+    @FetchRequest(
+        sortDescriptors: [NSSortDescriptor(keyPath: \Song.dateAdded, ascending: false)],
+        animation: .default)
+    private var songs: FetchedResults<Song>
+    @ObservedObject private var recents = RecentlyPlayedStore.shared
+
+    private var recentlyAdded: [Song] { Array(songs.prefix(12)) }
+    private var recentlyPlayed: [Song] {
+        let map = Dictionary(uniqueKeysWithValues: songs.compactMap { s in (s.id.map { ($0, s) }) })
+        return recents.items.compactMap { map[$0] }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                if !recentlyAdded.isEmpty {
+                    Text("Recently Added").font(.title2).bold().foregroundColor(.white).padding(.horizontal)
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 12) {
+                        ForEach(recentlyAdded) { song in
+                            VStack(alignment: .leading, spacing: 6) {
+                                LocalArtworkView(song: song, size: 110)
+                                Text(song.title ?? "Unknown").lineLimit(1).font(.caption).foregroundColor(.white)
+                                Text(song.artist ?? "Unknown").lineLimit(1).font(.caption2).foregroundColor(.white.opacity(0.7))
+                            }
+                            .padding(.horizontal, 4)
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+
+                if !recentlyPlayed.isEmpty {
+                    Text("Recently Played").font(.title2).bold().foregroundColor(.white).padding(.horizontal)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 14) {
+                            ForEach(recentlyPlayed) { song in
+                                VStack(alignment: .leading, spacing: 6) {
+                                    LocalArtworkView(song: song, size: 140)
+                                    Text(song.title ?? "Unknown").lineLimit(1).font(.caption).foregroundColor(.white)
+                                    Text(song.artist ?? "Unknown").lineLimit(1).font(.caption2).foregroundColor(.white.opacity(0.7))
+                                }
+                                .frame(width: 140)
+                            }
+                        }
+                        .padding(.horizontal)
+                    }
+                }
+
+                // Full list
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("All Songs").font(.headline).foregroundColor(.white).padding(.horizontal)
+                    ForEach(songs) { song in
+                        SongRow(song: song)
+                    }
+                }
+            }
+            .padding(.top, 12)
         }
     }
 }
+
+// MARK: - Song Row (simple inline for now)
+struct SongRow: View {
+    @EnvironmentObject var player: MusicPlayer
+    let song: Song
+
+    var body: some View {
+        HStack {
+            LocalArtworkView(song: song, size: 44)
+            VStack(alignment: .leading) {
+                Text(song.title ?? "Unknown Title").foregroundColor(.white)
+                Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
+            }
+            Spacer()
+            Button(action: { player.play(song: song) }) {
+                Image(systemName: "play.fill").foregroundColor(.white)
+            }
+        }
+        .padding(.horizontal)
+    }
+}
+
+// MARK: - Placeholder sections
+struct PlaylistsView: View { var body: some View { Text("Playlists").foregroundColor(.white); Spacer() } }
+struct ArtistsView: View { var body: some View { Text("Artists").foregroundColor(.white); Spacer() } }
+struct AlbumsView: View { var body: some View { Text("Albums").foregroundColor(.white); Spacer() } }
+struct DownloadedView: View { var body: some View { Text("Downloaded").foregroundColor(.white); Spacer() } }
 
 // MARK: - RadioView
 struct RadioView: View {
@@ -617,8 +669,7 @@ struct SearchView: View {
                     if mode == .library {
                         ForEach(filteredLibrary) { song in
                             HStack {
-                                Image(systemName: song.artwork ?? "music.note")
-                                    .resizable().frame(width: 44, height: 44).cornerRadius(5)
+                                LocalArtworkView(song: song, size: 44)
                                 VStack(alignment: .leading) {
                                     Text(song.title ?? "Unknown Title").foregroundColor(.white)
                                     Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
