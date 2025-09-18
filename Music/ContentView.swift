@@ -461,29 +461,31 @@ struct FullPlayerView: View {
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
             VStack(spacing: 16) {
-                Capsule().fill(Color.white.opacity(0.25)).frame(width: 40, height: 5).padding(.top, 8)
-                Spacer(minLength: 0)
+                VStack(spacing: 10) {
+                    Capsule().fill(Color.white.opacity(0.25)).frame(width: 40, height: 5).padding(.top, 8)
 
-                // Artwork
-                if let song = player.currentSong as? Song {
-                    LocalArtworkView(song: song, size: 300)
+                    // Artwork
+                    if let song = player.currentSong as? Song {
+                        LocalArtworkView(song: song, size: 300)
+                            .frame(width: 300, height: 300)
+                            .cornerRadius(16)
+                            .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 12)
+                    } else if let tempSong = player.currentSong as? TempSong, let art = tempSong.artwork, let url = URL(string: art) {
+                        AsyncImage(url: url) { phase in
+                            if let image = phase.image {
+                                image.resizable().scaledToFill()
+                            } else if phase.error != nil {
+                                Image(systemName: "exclamationmark.triangle").resizable().scaledToFit().foregroundColor(.gray)
+                            } else {
+                                Image(systemName: "music.note").resizable().scaledToFit().foregroundColor(.gray)
+                            }
+                        }
                         .frame(width: 300, height: 300)
                         .cornerRadius(16)
                         .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 12)
-                } else if let tempSong = player.currentSong as? TempSong, let art = tempSong.artwork, let url = URL(string: art) {
-                    AsyncImage(url: url) { phase in
-                        if let image = phase.image {
-                            image.resizable().scaledToFill()
-                        } else if phase.error != nil {
-                            Image(systemName: "exclamationmark.triangle").resizable().scaledToFit().foregroundColor(.gray)
-                        } else {
-                            Image(systemName: "music.note").resizable().scaledToFit().foregroundColor(.gray)
-                        }
                     }
-                    .frame(width: 300, height: 300)
-                    .cornerRadius(16)
-                    .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 12)
                 }
+                .padding(.top, -100)
 
                 // Titles
                 VStack(spacing: 4) {
