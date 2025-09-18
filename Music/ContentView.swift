@@ -475,7 +475,7 @@ struct LocalArtworkView: View {
 }
 
 // MARK: - Library (Apple Music style hub)
-enum LibrarySection: String, CaseIterable { case songs = "Songs", playlists = "Playlists", genres = "Genres", recentlyPlayed = "Recently Played" }
+enum LibrarySection: String, CaseIterable { case songs = "Songs", playlists = "Playlists", genres = "Genres", recents = "Recents" }
 
 struct LibraryView: View {
     @Environment(\.managedObjectContext) private var viewContext
@@ -496,7 +496,7 @@ struct LibraryView: View {
                     case .songs: SongsRootView()
                     case .playlists: PlaylistsView()
                     case .genres: GenresView()
-                    case .recentlyPlayed: RecentlyPlayedView()
+                    case .recents: RecentlyPlayedView()
                     }
                 }
             }
@@ -564,7 +564,7 @@ struct RecentlyPlayedView: View {
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Recently Played").font(.title2).bold().foregroundColor(.white).padding(.horizontal)
+                Text("Recents").font(.title2).bold().foregroundColor(.white).padding(.horizontal)
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 12) {
                     ForEach(recentlyPlayed) { song in
                         VStack(alignment: .leading, spacing: 6) {
