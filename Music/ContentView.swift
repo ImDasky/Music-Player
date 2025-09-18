@@ -94,7 +94,7 @@ final class LibraryManager: ObservableObject {
         self.persistenceController = persistenceController
     }
     
-    func addSong(title: String, artist: String, artwork: String? = nil, album: String? = nil, url: String? = nil) -> Bool {
+    func addSong(title: String, artist: String, artwork: String? = nil, album: String? = nil, url: String? = nil, qobuzTrackId: Int? = nil) -> Bool {
         // Check if song already exists
         let existingSongs = getAllSongs()
         let songExists = existingSongs.contains { song in
@@ -109,12 +109,17 @@ final class LibraryManager: ObservableObject {
             song.artwork = artwork
             song.album = album
             song.url = url
+            song.qobuzTrackId = Int32(qobuzTrackId ?? 0)
             song.dateAdded = Date()
             song.downloadStatus = DownloadStatus.downloading.rawValue // Start downloading immediately
             persistenceController.save()
             
             // Start download immediately when adding to library
-            DownloadManager.shared.downloadSong(song, context: viewContext)
+            if let trackId = qobuzTrackId {
+                DownloadManager.shared.downloadSongFromQobuz(song, trackId: trackId, context: viewContext)
+            } else {
+                DownloadManager.shared.downloadSong(song, context: viewContext)
+            }
             return true // Successfully added
         }
         return false // Already exists
@@ -126,7 +131,8 @@ final class LibraryManager: ObservableObject {
             artist: qobuzTrack.artist,
             artwork: qobuzTrack.image,
             album: qobuzTrack.album,
-            url: qobuzTrack.url
+            url: qobuzTrack.url,
+            qobuzTrackId: qobuzTrack.id
         )
     }
     
@@ -484,7 +490,7 @@ struct LibraryView: View {
                                 Text(song.title ?? "Unknown Title").foregroundColor(.white)
                                 Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
                                 
-                                // Only show status if downloading or failed - NO OTHER STATUS
+                                // Show status for downloading, queued, or failed
                                 if song.downloadStatus == DownloadStatus.downloading.rawValue {
                                     HStack {
                                         Image(systemName: "arrow.down.circle.fill")
@@ -493,6 +499,15 @@ struct LibraryView: View {
                                         Text("Downloading...")
                                             .font(.caption2)
                                             .foregroundColor(.blue)
+                                    }
+                                } else if song.downloadStatus == DownloadStatus.queued.rawValue {
+                                    HStack {
+                                        Image(systemName: "clock.circle.fill")
+                                            .foregroundColor(.orange)
+                                            .font(.caption)
+                                        Text("Queued...")
+                                            .font(.caption2)
+                                            .foregroundColor(.orange)
                                     }
                                 } else if song.downloadStatus == DownloadStatus.failed.rawValue {
                                     HStack {
@@ -504,7 +519,7 @@ struct LibraryView: View {
                                             .foregroundColor(.red)
                                     }
                                 }
-                                // NO OTHER STATUS SHOWN - downloaded songs show nothing
+                                // Downloaded songs show nothing
                             }
                             Spacer()
                             
@@ -589,8 +604,8 @@ struct SearchView: View {
                     .padding(.horizontal)
                     .transition(.move(edge: .top).combined(with: .opacity))
                     .animation(.easeInOut(duration: 0.3), value: searchFocused || !query.isEmpty)
-                    .onChange(of: mode) { _ in
-                        if mode == .library {
+                    .onChange(of: mode) { newValue in
+                        if newValue == .library {
                             filteredLibrary = libraryManager.searchSongs(query: query)
                         } else if !query.isEmpty {
                             qobuzAPI.search(query: query)
@@ -608,17 +623,21 @@ struct SearchView: View {
                                     Text(song.title ?? "Unknown Title").foregroundColor(.white)
                                     Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
                                     
-                                    // Only show status if downloading or failed - NO OTHER STATUS
+                                    // Show status for downloading, queued, or failed
                                     if song.downloadStatus == DownloadStatus.downloading.rawValue {
                                         Text("Downloading...")
                                             .font(.caption2)
                                             .foregroundColor(.blue)
+                                    } else if song.downloadStatus == DownloadStatus.queued.rawValue {
+                                        Text("Queued...")
+                                            .font(.caption2)
+                                            .foregroundColor(.orange)
                                     } else if song.downloadStatus == DownloadStatus.failed.rawValue {
                                         Text("Failed")
                                             .font(.caption2)
                                             .foregroundColor(.red)
                                     }
-                                    // NO OTHER STATUS SHOWN - downloaded songs show nothing
+                                    // Downloaded songs show nothing
                                 }
                                 Spacer()
                                 

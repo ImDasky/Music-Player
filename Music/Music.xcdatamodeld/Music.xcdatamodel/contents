@@ -12,8 +12,9 @@
         <attribute name="downloadStatus" optional="NO" attributeType="String" defaultValueString="notDownloaded"/>
         <attribute name="fileSize" optional="YES" attributeType="Integer 64" usesScalarValueType="YES"/>
         <attribute name="duration" optional="YES" attributeType="Double" usesScalarValueType="YES"/>
+        <attribute name="qobuzTrackId" optional="YES" attributeType="Integer 32" usesScalarValueType="YES"/>
     </entity>
     <elements>
-        <element name="Song" positionX="-63" positionY="-18" width="128" height="198"/>
+        <element name="Song" positionX="-63" positionY="-18" width="128" height="218"/>
     </elements>
 </model>

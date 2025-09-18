@@ -14,104 +14,342 @@ class AudioPlayer: NSObject, ObservableObject {
     
     @Published var isPlaying = false
     @Published var currentSong: Song?
+    @Published var currentTempSong: TempSong?
     @Published var currentTime: TimeInterval = 0
     @Published var duration: TimeInterval = 0
+    @Published var audioQuality: AudioQuality = .high
     
-    private var player: AVAudioPlayer?
-    private var timer: Timer?
+    private var player: AVPlayer?
+    private var timeObserver: Any?
+    private var audioEngine: AVAudioEngine?
+    private var audioPlayerNode: AVAudioPlayerNode?
+    private var audioFile: AVAudioFile?
+    
+    // High-quality audio settings
+    private let sampleRate: Double = 96000.0  // 96kHz for high quality
+    
+    enum AudioQuality: String, CaseIterable {
+        case standard = "Standard (44.1kHz)"
+        case high = "High (96kHz)"
+        case lossless = "Lossless (192kHz)"
+        
+        var sampleRate: Double {
+            switch self {
+            case .standard: return 44100.0
+            case .high: return 96000.0
+            case .lossless: return 192000.0
+            }
+        }
+        
+        var bitDepth: Int {
+            switch self {
+            case .standard: return 16
+            case .high: return 32
+            case .lossless: return 32
+            }
+        }
+    }
     
     private override init() {
         super.init()
-        setupAudioSession()
+        setupHighQualityAudioSession()
     }
     
-    private func setupAudioSession() {
+    private func setupHighQualityAudioSession() {
+        do {
+            // Configure for high-quality audio playback
+            let audioSession = AVAudioSession.sharedInstance()
+            
+            // Set category for playback with high quality
+            try audioSession.setCategory(.playback, mode: .default, options: [.allowAirPlay, .allowBluetooth])
+            
+            // Request high-quality audio format
+            try audioSession.setPreferredSampleRate(audioQuality.sampleRate)
+            try audioSession.setPreferredInputNumberOfChannels(2) // Stereo
+            try audioSession.setPreferredOutputNumberOfChannels(2) // Stereo
+            
+            // Activate the session
+            try audioSession.setActive(true)
+            
+            print("Audio session configured for \(audioQuality.rawValue) - Sample Rate: \(audioQuality.sampleRate)Hz")
+            
+        } catch {
+            print("Failed to setup high-quality audio session: \(error)")
+            // Fallback to standard setup
+            setupStandardAudioSession()
+        }
+    }
+    
+    private func setupStandardAudioSession() {
         do {
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
-            print("Failed to setup audio session: \(error)")
+            print("Failed to setup standard audio session: \(error)")
         }
     }
     
+    // MARK: - Play Song (Core Data)
     func play(song: Song) {
         currentSong = song
+        currentTempSong = nil
         
-        // Try to play local file first
+        // Try to play local FLAC file first
         if let localURL = DownloadManager.shared.getLocalFileURL(for: song) {
-            playFromURL(localURL)
+            playFromURL(localURL, isLocalFile: true)
         } else if let urlString = song.url, let url = URL(string: urlString) {
             // Fallback to streaming
-            playFromURL(url)
+            playFromURL(url, isLocalFile: false)
         }
     }
     
-    private func playFromURL(_ url: URL) {
+    // MARK: - Play Temp Song (Streaming)
+    func play(tempSong: TempSong) {
+        currentTempSong = tempSong
+        currentSong = nil
+        
+        if let urlString = tempSong.url, let url = URL(string: urlString) {
+            playFromURL(url, isLocalFile: false)
+        }
+    }
+    
+    private func playFromURL(_ url: URL, isLocalFile: Bool) {
+        print("Playing audio from: \(url.lastPathComponent)")
+        print("File type: \(url.pathExtension)")
+        print("Is local file: \(isLocalFile)")
+        
+        // For FLAC files, use high-quality audio engine
+        if url.pathExtension.lowercased() == "flac" && isLocalFile {
+            playFLACWithHighQuality(url: url)
+        } else {
+            // Use standard AVPlayer for other formats or streaming
+            playWithAVPlayer(url: url)
+        }
+    }
+    
+    private func playFLACWithHighQuality(url: URL) {
         do {
-            player = try AVAudioPlayer(contentsOf: url)
-            player?.delegate = self
-            player?.play()
-            isPlaying = true
-            duration = player?.duration ?? 0
+            // Create audio engine for high-quality playback
+            audioEngine = AVAudioEngine()
+            audioPlayerNode = AVAudioPlayerNode()
             
-            startTimer()
+            guard let engine = audioEngine, let playerNode = audioPlayerNode else {
+                print("Failed to create audio engine components")
+                playWithAVPlayer(url: url)
+                return
+            }
+            
+            // Attach player node to engine
+            engine.attach(playerNode)
+            
+            // Connect to main mixer
+            let mainMixer = engine.mainMixerNode
+            engine.connect(playerNode, to: mainMixer, format: nil)
+            
+            // Create audio file
+            audioFile = try AVAudioFile(forReading: url)
+            
+            guard let file = audioFile else {
+                print("Failed to create audio file")
+                playWithAVPlayer(url: url)
+                return
+            }
+            
+            // Configure for high quality
+            let format = file.processingFormat
+            print("Audio file format - Sample Rate: \(format.sampleRate)Hz, Channels: \(format.channelCount), Bit Depth: \(format.commonFormat.rawValue)")
+            
+            // Schedule the file for playback
+            playerNode.scheduleFile(file, at: nil) { [weak self] in
+                DispatchQueue.main.async {
+                    self?.isPlaying = false
+                    self?.currentTime = 0
+                }
+            }
+            
+            // Start the engine
+            try engine.start()
+            
+            // Start playback
+            playerNode.play()
+            isPlaying = true
+            
+            // Get duration
+            duration = Double(file.length) / file.processingFormat.sampleRate
+            
+            // Start time observer for high-quality playback
+            startHighQualityTimeObserver()
             updateNowPlayingInfo()
+            
+            print("High-quality FLAC playback started")
+            
         } catch {
-            print("Error playing audio: \(error)")
+            print("Failed to setup high-quality FLAC playback: \(error)")
+            // Fallback to standard AVPlayer
+            playWithAVPlayer(url: url)
+        }
+    }
+    
+    private func playWithAVPlayer(url: URL) {
+        // Create AVPlayerItem from URL
+        let playerItem = AVPlayerItem(url: url)
+        player = AVPlayer(playerItem: playerItem)
+        
+        // Add observer for when the item is ready to play
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(playerItemDidReachEnd),
+            name: .AVPlayerItemDidPlayToEndTime,
+            object: playerItem
+        )
+        
+        // Add observer for playback status
+        playerItem.addObserver(self, forKeyPath: "status", options: [.new], context: nil)
+        
+        // Start playing
+        player?.play()
+        isPlaying = true
+        
+        // Get duration
+        let duration = playerItem.asset.duration
+        self.duration = CMTimeGetSeconds(duration)
+        
+        // Start time observer
+        startTimeObserver()
+        updateNowPlayingInfo()
+    }
+    
+    private func startHighQualityTimeObserver() {
+        // For high-quality playback, we need to track time differently
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
+            guard let self = self, let playerNode = self.audioPlayerNode else {
+                timer.invalidate()
+                return
+            }
+            
+            if !self.isPlaying {
+                timer.invalidate()
+                return
+            }
+            
+            // Calculate current time based on player node
+            if let lastRenderTime = playerNode.lastRenderTime,
+               let playerTime = playerNode.playerTime(forNodeTime: lastRenderTime) {
+                self.currentTime = Double(playerTime.sampleTime) / playerTime.sampleRate
+            }
         }
     }
     
     func pause() {
-        player?.pause()
+        if let playerNode = audioPlayerNode {
+            playerNode.pause()
+        } else {
+            player?.pause()
+        }
         isPlaying = false
-        stopTimer()
     }
     
     func resume() {
-        player?.play()
+        if let playerNode = audioPlayerNode {
+            playerNode.play()
+        } else {
+            player?.play()
+        }
         isPlaying = true
-        startTimer()
     }
     
     func stop() {
-        player?.stop()
+        // Stop high-quality engine
+        audioEngine?.stop()
+        audioEngine = nil
+        audioPlayerNode = nil
+        audioFile = nil
+        
+        // Stop AVPlayer
+        player?.pause()
+        player = nil
+        
         isPlaying = false
         currentSong = nil
+        currentTempSong = nil
         currentTime = 0
         duration = 0
-        stopTimer()
+        stopTimeObserver()
     }
     
     func seek(to time: TimeInterval) {
-        player?.currentTime = time
+        if let playerNode = audioPlayerNode, let file = audioFile {
+            // Seek in high-quality playback
+            let sampleTime = AVAudioFramePosition(time * file.processingFormat.sampleRate)
+            let playerTime = AVAudioTime(sampleTime: sampleTime, atRate: file.processingFormat.sampleRate)
+            playerNode.stop()
+            playerNode.scheduleFile(file, at: playerTime) { [weak self] in
+                DispatchQueue.main.async {
+                    self?.isPlaying = false
+                    self?.currentTime = 0
+                }
+            }
+            playerNode.play()
+        } else {
+            // Seek in standard AVPlayer
+            let cmTime = CMTime(seconds: time, preferredTimescale: 1000)
+            player?.seek(to: cmTime)
+        }
         currentTime = time
     }
     
-    private func startTimer() {
-        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            self?.currentTime = self?.player?.currentTime ?? 0
+    func setAudioQuality(_ quality: AudioQuality) {
+        audioQuality = quality
+        setupHighQualityAudioSession()
+    }
+    
+    private func startTimeObserver() {
+        let interval = CMTime(seconds: 0.1, preferredTimescale: 1000)
+        timeObserver = player?.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+            self?.currentTime = CMTimeGetSeconds(time)
         }
     }
     
-    private func stopTimer() {
-        timer?.invalidate()
-        timer = nil
+    private func stopTimeObserver() {
+        if let observer = timeObserver {
+            player?.removeTimeObserver(observer)
+            timeObserver = nil
+        }
     }
     
     private func updateNowPlayingInfo() {
-        guard let song = currentSong else { return }
+        let songTitle: String
+        let songArtist: String
+        let songAlbum: String?
+        let songArtwork: String?
+        
+        if let song = currentSong {
+            songTitle = song.title ?? "Unknown Title"
+            songArtist = song.artist ?? "Unknown Artist"
+            songAlbum = song.album
+            songArtwork = song.artwork
+        } else if let tempSong = currentTempSong {
+            songTitle = tempSong.title
+            songArtist = tempSong.artist
+            songAlbum = tempSong.album
+            songArtwork = tempSong.artwork
+        } else {
+            return
+        }
         
         var nowPlayingInfo: [String: Any] = [
-            MPMediaItemPropertyTitle: song.title ?? "Unknown Title",
-            MPMediaItemPropertyArtist: song.artist ?? "Unknown Artist",
-            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0
+            MPMediaItemPropertyTitle: songTitle,
+            MPMediaItemPropertyArtist: songArtist,
+            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: currentTime,
+            MPMediaItemPropertyPlaybackDuration: duration
         ]
         
-        if let album = song.album {
+        if let album = songAlbum {
             nowPlayingInfo[MPMediaItemPropertyAlbumTitle] = album
         }
         
-        if let artwork = song.artwork, let url = URL(string: artwork) {
+        if let artwork = songArtwork, let url = URL(string: artwork) {
             // Load artwork asynchronously
             URLSession.shared.dataTask(with: url) { data, _, _ in
                 if let data = data, let image = UIImage(data: data) {
@@ -124,17 +362,34 @@ class AudioPlayer: NSObject, ObservableObject {
         
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
     }
-}
-
-extension AudioPlayer: AVAudioPlayerDelegate {
-    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+    
+    @objc private func playerItemDidReachEnd() {
         isPlaying = false
         currentTime = 0
-        stopTimer()
+        stopTimeObserver()
     }
     
-    func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
-        print("Audio player decode error: \(error?.localizedDescription ?? "Unknown error")")
-        isPlaying = false
+    override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
+        if keyPath == "status" {
+            if let playerItem = object as? AVPlayerItem {
+                switch playerItem.status {
+                case .readyToPlay:
+                    print("Audio is ready to play")
+                case .failed:
+                    print("Audio playback failed: \(playerItem.error?.localizedDescription ?? "Unknown error")")
+                    isPlaying = false
+                case .unknown:
+                    print("Audio status unknown")
+                @unknown default:
+                    break
+                }
+            }
+        }
+    }
+    
+    deinit {
+        stopTimeObserver()
+        NotificationCenter.default.removeObserver(self)
+        audioEngine?.stop()
     }
 }
