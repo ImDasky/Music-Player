@@ -133,6 +133,10 @@ class AudioPlayer: NSObject, ObservableObject {
     
     // MARK: - Play Song (Core Data)
     func play(song: Song) {
+        // Stop any previous playback to avoid stale isPlaying state
+        stop()
+        
+        // Set intent
         currentSong = song
         currentTempSong = nil
         
@@ -142,16 +146,28 @@ class AudioPlayer: NSObject, ObservableObject {
         } else if let urlString = song.url, let url = URL(string: urlString) {
             // Fallback to streaming
             playFromURL(url, isLocalFile: false)
+        } else {
+            // Nothing to play; clear state
+            isPlaying = false
+            currentSong = nil
+            updateNowPlayingInfo()
         }
     }
     
     // MARK: - Play Temp Song (Streaming)
     func play(tempSong: TempSong) {
+        // Stop any previous playback to avoid stale isPlaying state
+        stop()
+        
         currentTempSong = tempSong
         currentSong = nil
         
         if let urlString = tempSong.url, let url = URL(string: urlString) {
             playFromURL(url, isLocalFile: false)
+        } else {
+            isPlaying = false
+            currentTempSong = nil
+            updateNowPlayingInfo()
         }
     }
     
@@ -222,6 +238,9 @@ class AudioPlayer: NSObject, ObservableObject {
             // Start time observer for high-quality playback
             startHighQualityTimeObserver()
             updateNowPlayingInfo()
+            
+            // Record recently played for library song
+            if let s = currentSong { RecentlyPlayedStore.shared.record(s.id) }
             
             print("High-quality FLAC playback started")
             
@@ -418,6 +437,8 @@ class AudioPlayer: NSObject, ObservableObject {
                 case .readyToPlay:
                     print("Audio is ready to play")
                     isPlaying = true
+                    // Record recently played for library song when streaming path used
+                    if let s = currentSong { RecentlyPlayedStore.shared.record(s.id) }
                     updateNowPlayingInfo()
                 case .failed:
                     print("Audio playback failed: \(playerItem.error?.localizedDescription ?? "Unknown error")")
