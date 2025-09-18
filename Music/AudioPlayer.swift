@@ -53,29 +53,21 @@ class AudioPlayer: NSObject, ObservableObject {
     private override init() {
         super.init()
         setupHighQualityAudioSession()
+        setupRemoteCommandCenter()
+        observeInterruptions()
     }
     
     private func setupHighQualityAudioSession() {
         do {
-            // Configure for high-quality audio playback
+            // Configure for high-quality audio playback and background audio
             let audioSession = AVAudioSession.sharedInstance()
-            
-            // Set category for playback with high quality
             try audioSession.setCategory(.playback, mode: .default, options: [.allowAirPlay, .allowBluetooth])
-            
-            // Request high-quality audio format
             try audioSession.setPreferredSampleRate(audioQuality.sampleRate)
-            try audioSession.setPreferredInputNumberOfChannels(2) // Stereo
-            try audioSession.setPreferredOutputNumberOfChannels(2) // Stereo
-            
-            // Activate the session
+            try audioSession.setPreferredInputNumberOfChannels(2)
+            try audioSession.setPreferredOutputNumberOfChannels(2)
             try audioSession.setActive(true)
-            
-            print("Audio session configured for \(audioQuality.rawValue) - Sample Rate: \(audioQuality.sampleRate)Hz")
-            
         } catch {
             print("Failed to setup high-quality audio session: \(error)")
-            // Fallback to standard setup
             setupStandardAudioSession()
         }
     }
@@ -86,6 +78,56 @@ class AudioPlayer: NSObject, ObservableObject {
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
             print("Failed to setup standard audio session: \(error)")
+        }
+    }
+    
+    private func setupRemoteCommandCenter() {
+        let commandCenter = MPRemoteCommandCenter.shared()
+        commandCenter.playCommand.isEnabled = true
+        commandCenter.pauseCommand.isEnabled = true
+        commandCenter.togglePlayPauseCommand.isEnabled = true
+        
+        commandCenter.playCommand.addTarget { [weak self] _ in
+            self?.resume()
+            self?.updateNowPlayingInfo()
+            return .success
+        }
+        
+        commandCenter.pauseCommand.addTarget { [weak self] _ in
+            self?.pause()
+            self?.updateNowPlayingInfo()
+            return .success
+        }
+        
+        commandCenter.togglePlayPauseCommand.addTarget { [weak self] _ in
+            guard let self = self else { return .commandFailed }
+            if self.isPlaying { self.pause() } else { self.resume() }
+            self.updateNowPlayingInfo()
+            return .success
+        }
+    }
+    
+    private func observeInterruptions() {
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(handleInterruption(_:)),
+                                               name: AVAudioSession.interruptionNotification,
+                                               object: nil)
+    }
+    
+    @objc private func handleInterruption(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
+        
+        if type == .began {
+            pause()
+        } else if type == .ended {
+            if let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt {
+                let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
+                if options.contains(.shouldResume) {
+                    resume()
+                }
+            }
         }
     }
     
@@ -350,17 +392,18 @@ class AudioPlayer: NSObject, ObservableObject {
         }
         
         if let artwork = songArtwork, let url = URL(string: artwork) {
-            // Load artwork asynchronously
             URLSession.shared.dataTask(with: url) { data, _, _ in
                 if let data = data, let image = UIImage(data: data) {
                     let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
                     nowPlayingInfo[MPMediaItemPropertyArtwork] = artwork
                     MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
+                } else {
+                    MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
                 }
             }.resume()
+        } else {
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
         }
-        
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
     }
     
     @objc private func playerItemDidReachEnd() {
