@@ -594,10 +594,9 @@ struct SongRow: View {
                 Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
             }
             Spacer()
-            Button(action: { player.play(song: song) }) {
-                Image(systemName: "play.fill").foregroundColor(.white)
-            }
         }
+        .contentShape(Rectangle())
+        .onTapGesture { player.play(song: song) }
         .padding(.horizontal)
     }
 }
@@ -703,12 +702,9 @@ struct SearchView: View {
                                     // Downloaded songs show nothing
                                 }
                                 Spacer()
-                                
-                                // Play button
-                                Button(action: { player.play(song: song) }) {
-                                    Image(systemName: "play.fill").foregroundColor(.white)
-                                }
                             }
+                            .contentShape(Rectangle())
+                            .onTapGesture { player.play(song: song) }
                             .listRowBackground(Color.clear)
                         }
                     } else {
