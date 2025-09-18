@@ -26,6 +26,9 @@ class AudioPlayer: NSObject, ObservableObject {
     private var audioPlayerNode: AVAudioPlayerNode?
     private var audioFile: AVAudioFile?
     private var hqStartTimeOffset: Double = 0
+    // Guard flags for completion handling
+    private var isSeekingHQ: Bool = false
+    private var playbackGeneration: UInt64 = 0
     
     // High-quality audio settings
     private let sampleRate: Double = 96000.0  // 96kHz for high quality
@@ -229,12 +232,18 @@ class AudioPlayer: NSObject, ObservableObject {
             
             // Reset base offset
             hqStartTimeOffset = 0
+            playbackGeneration &+= 1
+            let generationAtSchedule = playbackGeneration
             
             // Schedule the file for playback from start
             playerNode.scheduleFile(file, at: nil) { [weak self] in
                 DispatchQueue.main.async {
-                    self?.isPlaying = false
-                    self?.currentTime = 0
+                    guard let self = self else { return }
+                    // Ignore completion if a seek or new schedule occurred
+                    if self.isSeekingHQ || generationAtSchedule != self.playbackGeneration { return }
+                    self.isPlaying = false
+                    self.currentTime = 0
+                    self.postFinished()
                 }
             }
             
@@ -272,7 +281,7 @@ class AudioPlayer: NSObject, ObservableObject {
         // Add observer for when the item is ready to play
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(playerItemDidReachEnd),
+            selector: #selector(playerItemDidReachEnd(_:)),
             name: .AVPlayerItemDidPlayToEndTime,
             object: playerItem
         )
@@ -286,6 +295,7 @@ class AudioPlayer: NSObject, ObservableObject {
         
         // Start playing (will actually start when ready)
         player?.play()
+        isPlaying = true
         
         // Get duration
         let duration = playerItem.asset.duration
@@ -356,6 +366,8 @@ class AudioPlayer: NSObject, ObservableObject {
         audioPlayerNode = nil
         audioFile = nil
         hqStartTimeOffset = 0
+        isSeekingHQ = false
+        playbackGeneration &+= 1
         
         // Stop AVPlayer
         player?.pause()
@@ -379,24 +391,37 @@ class AudioPlayer: NSObject, ObservableObject {
             let framesToPlay = max(0, totalFrames - startFrame)
             
             // Keep engine running, just stop the node and reschedule
+            isSeekingHQ = true
+            playbackGeneration &+= 1
+            let generationAtSchedule = playbackGeneration
             playerNode.stop()
             
             hqStartTimeOffset = clampedTime
             
             playerNode.scheduleSegment(file, startingFrame: startFrame, frameCount: AVAudioFrameCount(framesToPlay), at: nil) { [weak self] in
                 DispatchQueue.main.async {
-                    self?.isPlaying = false
-                    self?.currentTime = 0
+                    guard let self = self else { return }
+                    // Ignore completion events that were caused by a seek or superseded schedule
+                    if self.isSeekingHQ || generationAtSchedule != self.playbackGeneration { return }
+                    self.isPlaying = false
+                    self.currentTime = 0
+                    self.postFinished()
                 }
             }
             playerNode.play()
             
             // Maintain playing state
             isPlaying = true
+            isSeekingHQ = false
         } else {
-            // Seek in standard AVPlayer
+            // Seek in standard AVPlayer, preserve play/pause state
+            let wasPlaying = isPlaying
             let cmTime = CMTime(seconds: time, preferredTimescale: 1000)
-            player?.seek(to: cmTime)
+            player?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+                guard let self = self else { return }
+                if wasPlaying { self.player?.play(); self.isPlaying = true } else { self.isPlaying = false }
+                self.updateNowPlayingInfo()
+            }
         }
         currentTime = time
     }
@@ -467,10 +492,15 @@ class AudioPlayer: NSObject, ObservableObject {
         }
     }
     
-    @objc private func playerItemDidReachEnd() {
+    @objc private func playerItemDidReachEnd(_ notification: Notification) {
         isPlaying = false
         currentTime = 0
         stopTimeObserver()
+        postFinished()
+    }
+    
+    private func postFinished() {
+        NotificationCenter.default.post(name: .audioPlayerDidFinish, object: self)
     }
     
     private struct AssociatedKeys { static var fallbackURLKey = "fallbackURLKey" }
@@ -509,4 +539,8 @@ class AudioPlayer: NSObject, ObservableObject {
         NotificationCenter.default.removeObserver(self)
         audioEngine?.stop()
     }
+}
+
+extension Notification.Name {
+    static let audioPlayerDidFinish = Notification.Name("AudioPlayerDidFinish")
 }

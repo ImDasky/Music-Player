@@ -268,6 +268,9 @@ class DownloadManager: ObservableObject {
                     // Get duration using AVFoundation
                     self?.getAudioDuration(for: song, at: localURL)
                     
+                    // Extract and persist embedded artwork/metadata for high quality covers
+                    self?.extractAndSaveArtwork(from: localURL, for: song)
+                    
                     try? context.save()
                     print("Download completed successfully!")
                     
@@ -330,6 +333,9 @@ class DownloadManager: ObservableObject {
                     
                     // Get duration using AVFoundation
                     self?.getAudioDuration(for: song, at: localURL)
+                    
+                    // Extract and persist embedded artwork/metadata for high quality covers
+                    self?.extractAndSaveArtwork(from: localURL, for: song)
                     
                     self?.activeDownloads.removeValue(forKey: downloadId)
                     try? context.save()
@@ -500,7 +506,119 @@ class DownloadManager: ObservableObject {
             completion(.success(url))
         }
     }
-}
+    
+    // MARK: - Embedded artwork extraction for local files
+    private func extractAndSaveArtwork(from url: URL, for song: Song) {
+        let asset = AVAsset(url: url)
+        // Try common metadata first
+        if let data = extractArtworkData(from: asset.commonMetadata) {
+            saveArtwork(data: data, for: song)
+            return
+        }
+        // Try all available formats
+        for fmt in asset.availableMetadataFormats {
+            if let data = extractArtworkData(from: asset.metadata(forFormat: fmt)) {
+                saveArtwork(data: data, for: song)
+                return
+            }
+        }
+        // Fallback: parse FLAC PICTURE block manually
+        if url.pathExtension.lowercased() == "flac", let data = parseFLACPicture(at: url) {
+            saveArtwork(data: data, for: song)
+            return
+        }
+    }
+    
+    private func extractArtworkData(from items: [AVMetadataItem]) -> Data? {
+        for item in items {
+            if let data = item.dataValue { return data }
+            if let data = item.value as? Data { return data }
+        }
+        return nil
+    }
+    
+    private func saveArtwork(data: Data, for song: Song) {
+        let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let artworkDirectory = documentsDirectory.appendingPathComponent("Artwork", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: artworkDirectory.path) {
+            try? FileManager.default.createDirectory(at: artworkDirectory, withIntermediateDirectories: true)
+        }
+        let artworkFileName = "\(song.id?.uuidString ?? UUID().uuidString).jpg"
+        let artworkURL = artworkDirectory.appendingPathComponent(artworkFileName)
+        do {
+            try data.write(to: artworkURL)
+            song.artwork = artworkURL.path
+        } catch {
+            print("Failed to save artwork: \(error)")
+        }
+    }
+
+    
+    // Parse FLAC METADATA_BLOCK of type 6 (PICTURE) to extract embedded cover image
+    private func parseFLACPicture(at url: URL) -> Data? {
+        guard let fileData = try? Data(contentsOf: url) else { return nil }
+        var idx = 0
+        
+        // Helper to read bytes
+        func readBytes(_ count: Int) -> Data? {
+            guard idx + count <= fileData.count else { return nil }
+            let data = fileData.subdata(in: idx..<idx+count)
+            idx += count
+            return data
+        }
+        
+        // Helper to read big-endian integer
+        func readBEInt(_ count: Int) -> UInt32? {
+            guard let data = readBytes(count) else { return nil }
+            var result: UInt32 = 0
+            for byte in data {
+                result = (result << 8) | UInt32(byte)
+            }
+            return result
+        }
+        
+        // Check FLAC header
+        guard let header = readBytes(4), String(data: header, encoding: .ascii) == "fLaC" else { return nil }
+        
+        // Parse metadata blocks
+        while idx < fileData.count {
+            guard let blockHeader = readBytes(1) else { break }
+            let isLast = (blockHeader[0] & 0x80) != 0
+            let blockType = blockHeader[0] & 0x7F
+            let blockLength = readBEInt(3) ?? 0
+            
+            if blockType == 6 { // PICTURE block
+                // Skip picture type (4 bytes)
+                guard readBytes(4) != nil else { break }
+                
+                // Read MIME type length and MIME type
+                guard let mimeLength = readBEInt(4), let _ = readBytes(Int(mimeLength)) else { break }
+                
+                // Skip description length and description
+                guard let descLength = readBEInt(4), let _ = readBytes(Int(descLength)) else { break }
+                
+                // Skip width, height, color depth, colors used
+                guard readBytes(16) != nil else { break }
+                
+                // Read picture data length and data
+                guard let dataLength = readBEInt(4) else { break }
+                if let pictureData = readBytes(Int(dataLength)) {
+                    return pictureData
+                }
+            } else {
+                // Skip this block
+                if let _ = readBytes(Int(blockLength)) {
+                    if isLast { break }
+                } else {
+                    break
+                }
+            }
+            
+            if isLast { break }
+        }
+        
+        return nil
+    }}
 
 // MARK: - Insecure URLSession Delegate
 class InsecureURLSessionDelegate: NSObject, URLSessionDelegate {
@@ -545,6 +663,7 @@ struct DownloadProgress {
     var percentage: Double {
         guard totalBytes > 0 else { return 0 }
         return Double(downloadedBytes) / Double(totalBytes)
+
     }
 }
 
