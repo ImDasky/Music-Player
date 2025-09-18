@@ -407,7 +407,13 @@ struct FullPlayerView: View {
                     .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 12)
             } else if let tempSong = player.currentSong as? TempSong, let art = tempSong.artwork, let url = URL(string: art) {
                 AsyncImage(url: url) { phase in
-                    (phase.image?.resizable().scaledToFill()) ?? Image(systemName: "music.note").resizable().scaledToFit().foregroundColor(.gray)
+                    if let image = phase.image {
+                        image.resizable().scaledToFill()
+                    } else if phase.error != nil {
+                        Image(systemName: "exclamationmark.triangle").resizable().scaledToFit().foregroundColor(.gray)
+                    } else {
+                        Image(systemName: "music.note").resizable().scaledToFit().foregroundColor(.gray)
+                    }
                 }
                 .frame(width: 300, height: 300)
                 .cornerRadius(16)
