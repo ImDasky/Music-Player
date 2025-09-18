@@ -767,7 +767,7 @@ struct SongsRootView: View {
         animation: .default)
     private var songs: FetchedResults<Song>
     
-    private var recentlyAdded: [Song] { Array(songs.prefix(12)) }
+    private var recentlyAdded: [Song] { Array(songs.prefix(6)) }
     
     @EnvironmentObject var player: MusicPlayer
 
@@ -776,24 +776,19 @@ struct SongsRootView: View {
             VStack(alignment: .leading, spacing: 20) {
                 if !recentlyAdded.isEmpty {
                     Text("Recently Added").font(.title2).bold().foregroundColor(.white).padding(.horizontal)
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        LazyHGrid(rows: [GridItem(.fixed(120), spacing: 18, alignment: .top), GridItem(.fixed(120), spacing: 18, alignment: .top)], spacing: 12) {
-                            ForEach(recentlyAdded) { song in
-                                VStack(alignment: .leading, spacing: 6) {
-                                    LocalArtworkView(song: song, size: 100)
-                                    Text(song.title ?? "Unknown").lineLimit(1).font(.caption).foregroundColor(.white)
-                                    Text(song.artist ?? "Unknown").lineLimit(1).font(.caption2).foregroundColor(.white.opacity(0.7))
-                                }
-                                .frame(width: 130, alignment: .leading)
-                                .padding(.horizontal, 2)
-                                .padding(.vertical, 8)
-                                .contentShape(Rectangle())
-                                .onTapGesture { player.play(song: song) }
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 12) {
+                        ForEach(recentlyAdded) { song in
+                            VStack(alignment: .leading, spacing: 6) {
+                                LocalArtworkView(song: song, size: 110)
+                                Text(song.title ?? "Unknown").lineLimit(1).font(.caption).foregroundColor(.white)
+                                Text(song.artist ?? "Unknown").lineLimit(1).font(.caption2).foregroundColor(.white.opacity(0.7))
                             }
+                            .padding(.horizontal, 4)
+                            .contentShape(Rectangle())
+                            .onTapGesture { player.play(song: song) }
                         }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 10)
                     }
+                    .padding(.horizontal)
                 }
 
                 // Full list
