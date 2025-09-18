@@ -412,114 +412,117 @@ struct FullPlayerView: View {
     }
 
     var body: some View {
-        VStack(spacing: 16) {
-            Capsule().fill(Color.white.opacity(0.25)).frame(width: 40, height: 5).padding(.top, 8)
-            Spacer(minLength: 0)
+        ScrollView(.vertical, showsIndicators: true) {
+            VStack(spacing: 16) {
+                Capsule().fill(Color.white.opacity(0.25)).frame(width: 40, height: 5).padding(.top, 8)
+                Spacer(minLength: 0)
 
-            // Artwork
-            if let song = player.currentSong as? Song {
-                LocalArtworkView(song: song, size: 300)
+                // Artwork
+                if let song = player.currentSong as? Song {
+                    LocalArtworkView(song: song, size: 300)
+                        .frame(width: 300, height: 300)
+                        .cornerRadius(16)
+                        .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 12)
+                } else if let tempSong = player.currentSong as? TempSong, let art = tempSong.artwork, let url = URL(string: art) {
+                    AsyncImage(url: url) { phase in
+                        if let image = phase.image {
+                            image.resizable().scaledToFill()
+                        } else if phase.error != nil {
+                            Image(systemName: "exclamationmark.triangle").resizable().scaledToFit().foregroundColor(.gray)
+                        } else {
+                            Image(systemName: "music.note").resizable().scaledToFit().foregroundColor(.gray)
+                        }
+                    }
                     .frame(width: 300, height: 300)
                     .cornerRadius(16)
                     .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 12)
-            } else if let tempSong = player.currentSong as? TempSong, let art = tempSong.artwork, let url = URL(string: art) {
-                AsyncImage(url: url) { phase in
-                    if let image = phase.image {
-                        image.resizable().scaledToFill()
-                    } else if phase.error != nil {
-                        Image(systemName: "exclamationmark.triangle").resizable().scaledToFit().foregroundColor(.gray)
-                    } else {
-                        Image(systemName: "music.note").resizable().scaledToFit().foregroundColor(.gray)
+                }
+
+                // Titles
+                VStack(spacing: 4) {
+                    if let song = player.currentSong as? Song {
+                        Text(song.title ?? "Unknown Title").font(.title2).fontWeight(.semibold).foregroundColor(.white)
+                        Text(song.artist ?? "Unknown Artist").font(.subheadline).foregroundColor(.white.opacity(0.85))
+                    } else if let tempSong = player.currentSong as? TempSong {
+                        Text(tempSong.title).font(.title2).fontWeight(.semibold).foregroundColor(.white)
+                        Text(tempSong.artist).font(.subheadline).foregroundColor(.white.opacity(0.85))
                     }
-                }
-                .frame(width: 300, height: 300)
-                .cornerRadius(16)
-                .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 12)
-            }
+                }.padding(.top, 4)
 
-            // Titles
-            VStack(spacing: 4) {
-                if let song = player.currentSong as? Song {
-                    Text(song.title ?? "Unknown Title").font(.title2).fontWeight(.semibold).foregroundColor(.white)
-                    Text(song.artist ?? "Unknown Artist").font(.subheadline).foregroundColor(.white.opacity(0.85))
-                } else if let tempSong = player.currentSong as? TempSong {
-                    Text(tempSong.title).font(.title2).fontWeight(.semibold).foregroundColor(.white)
-                    Text(tempSong.artist).font(.subheadline).foregroundColor(.white.opacity(0.85))
+                // Scrubber
+                VStack(spacing: 6) {
+                    LineScrubber(currentTime: Binding(
+                        get: { isScrubbing ? tempTime : audio.currentTime },
+                        set: { newVal in
+                            tempTime = max(0, min(newVal, max(audio.duration, 0)))
+                        }
+                    ), duration: audio.duration, onCommit: {
+                        AudioPlayer.shared.seek(to: tempTime)
+                    }, onBegin: {
+                        isScrubbing = true
+                        tempTime = audio.currentTime
+                    }, onEnd: {
+                        isScrubbing = false
+                    })
                 }
-            }.padding(.top, 4)
-
-            // Scrubber
-            VStack(spacing: 6) {
-                LineScrubber(currentTime: Binding(
-                    get: { isScrubbing ? tempTime : audio.currentTime },
-                    set: { newVal in
-                        tempTime = max(0, min(newVal, max(audio.duration, 0)))
-                    }
-                ), duration: audio.duration, onCommit: {
-                    AudioPlayer.shared.seek(to: tempTime)
-                }, onBegin: {
-                    isScrubbing = true
-                    tempTime = audio.currentTime
-                }, onEnd: {
-                    isScrubbing = false
-                })
-            }
-            .padding(.horizontal)
-
-            // Playback controls
-            HStack(spacing: 28) {
-                Button(action: { isShuffling.toggle() }) {
-                    Image(systemName: "shuffle").foregroundColor(isShuffling ? .white : .white.opacity(0.6))
-                }
-                Button(action: { /* previous placeholder */ }) {
-                    Image(systemName: "backward.fill").foregroundColor(.white)
-                }
-                Button(action: {
-                    if audio.isPlaying { AudioPlayer.shared.pause() } else { AudioPlayer.shared.resume() }
-                }) {
-                    Image(systemName: audio.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 34, weight: .bold))
-                        .foregroundColor(.white)
-                }
-                Button(action: { /* next placeholder */ }) {
-                    Image(systemName: "forward.fill").foregroundColor(.white)
-                }
-                Button(action: {
-                    switch repeatMode { case .off: repeatMode = .one; case .one: repeatMode = .all; case .all: repeatMode = .off }
-                }) {
-                    let symbol: String = (repeatMode == .off ? "repeat" : (repeatMode == .one ? "repeat.1" : "repeat"))
-                    Image(systemName: symbol).foregroundColor(repeatMode == .off ? .white.opacity(0.6) : .white)
-                }
-            }
-            .font(.title2)
-
-            // Volume
-            VolumeView()
-                .frame(height: 36)
                 .padding(.horizontal)
 
-            // Up Next / Options row
-            HStack {
-                Button(action: { showUpNext.toggle() }) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "text.line.first.and.arrowtriangle.forward").foregroundColor(.white)
-                        Text("Up Next").foregroundColor(.white)
+                // Playback controls
+                HStack(spacing: 28) {
+                    Button(action: { isShuffling.toggle() }) {
+                        Image(systemName: "shuffle").foregroundColor(isShuffling ? .white : .white.opacity(0.6))
+                    }
+                    Button(action: { /* previous placeholder */ }) {
+                        Image(systemName: "backward.fill").foregroundColor(.white)
+                    }
+                    Button(action: {
+                        if audio.isPlaying { AudioPlayer.shared.pause() } else { AudioPlayer.shared.resume() }
+                    }) {
+                        Image(systemName: audio.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 34, weight: .bold))
+                            .foregroundColor(.white)
+                    }
+                    Button(action: { /* next placeholder */ }) {
+                        Image(systemName: "forward.fill").foregroundColor(.white)
+                    }
+                    Button(action: {
+                        switch repeatMode { case .off: repeatMode = .one; case .one: repeatMode = .all; case .all: repeatMode = .off }
+                    }) {
+                        let symbol: String = (repeatMode == .off ? "repeat" : (repeatMode == .one ? "repeat.1" : "repeat"))
+                        Image(systemName: symbol).foregroundColor(repeatMode == .off ? .white.opacity(0.6) : .white)
                     }
                 }
-                Spacer()
-                Menu {
-                    Picker("Quality", selection: Binding(get: { AudioPlayer.shared.audioQuality }, set: { AudioPlayer.shared.setAudioQuality($0) })) {
-                        ForEach(AudioPlayer.AudioQuality.allCases, id: \.self) { q in
-                            Text(q.rawValue).tag(q)
+                .font(.title2)
+
+                // Volume
+                VolumeView()
+                    .frame(height: 36)
+                    .padding(.horizontal)
+
+                // Up Next / Options row
+                HStack {
+                    Button(action: { showUpNext.toggle() }) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "text.line.first.and.arrowtriangle.forward").foregroundColor(.white)
+                            Text("Up Next").foregroundColor(.white)
                         }
                     }
-                } label: {
-                    Image(systemName: "ellipsis.circle").foregroundColor(.white).font(.title3)
+                    Spacer()
+                    Menu {
+                        Picker("Quality", selection: Binding(get: { AudioPlayer.shared.audioQuality }, set: { AudioPlayer.shared.setAudioQuality($0) })) {
+                            ForEach(AudioPlayer.AudioQuality.allCases, id: \.self) { q in
+                                Text(q.rawValue).tag(q)
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle").foregroundColor(.white).font(.title3)
+                    }
                 }
-            }
-            .padding(.horizontal)
+                .padding(.horizontal)
 
-            Spacer(minLength: 0)
+                // Extra bottom space to allow scrolling further
+                Color.clear.frame(height: 300)
+            }
         }
         .padding(.bottom, 20)
         .background(Color.black.ignoresSafeArea())
