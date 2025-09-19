@@ -93,6 +93,8 @@ class AudioPlayer: NSObject, ObservableObject {
         commandCenter.playCommand.isEnabled = true
         commandCenter.pauseCommand.isEnabled = true
         commandCenter.togglePlayPauseCommand.isEnabled = true
+        commandCenter.nextTrackCommand.isEnabled = true
+        commandCenter.previousTrackCommand.isEnabled = true
         
         commandCenter.playCommand.addTarget { [weak self] _ in
             self?.resume()
@@ -110,6 +112,15 @@ class AudioPlayer: NSObject, ObservableObject {
             guard let self = self else { return .commandFailed }
             if self.isPlaying { self.pause() } else { self.resume() }
             self.updateNowPlayingInfo()
+            return .success
+        }
+
+        commandCenter.nextTrackCommand.addTarget { _ in
+            NotificationCenter.default.post(name: .remoteCommandNext, object: nil)
+            return .success
+        }
+        commandCenter.previousTrackCommand.addTarget { _ in
+            NotificationCenter.default.post(name: .remoteCommandPrevious, object: nil)
             return .success
         }
     }
@@ -489,6 +500,18 @@ class AudioPlayer: NSObject, ObservableObject {
             nowPlayingInfo[MPMediaItemPropertyAlbumTitle] = album
         }
         
+        // Prefer local artwork for library songs if available
+        if let libSong = currentSong, let id = libSong.id {
+            let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+            let defaultLocal = documentsDirectory.appendingPathComponent("Artwork", isDirectory: true).appendingPathComponent("\(id.uuidString).jpg").path
+            if FileManager.default.fileExists(atPath: defaultLocal), let image = UIImage(contentsOfFile: defaultLocal) {
+                let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+                nowPlayingInfo[MPMediaItemPropertyArtwork] = artwork
+                MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
+                return
+            }
+        }
+
         if let artwork = songArtwork, let url = URL(string: artwork) {
             URLSession.shared.dataTask(with: url) { data, _, _ in
                 if let data = data, let image = UIImage(data: data) {
@@ -499,6 +522,10 @@ class AudioPlayer: NSObject, ObservableObject {
                     MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
                 }
             }.resume()
+        } else if let artworkPath = songArtwork, FileManager.default.fileExists(atPath: artworkPath), let image = UIImage(contentsOfFile: artworkPath) {
+            let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+            nowPlayingInfo[MPMediaItemPropertyArtwork] = artwork
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
         } else {
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
         }
@@ -557,4 +584,6 @@ class AudioPlayer: NSObject, ObservableObject {
 
 extension Notification.Name {
     static let audioPlayerDidFinish = Notification.Name("AudioPlayerDidFinish")
+    static let remoteCommandNext = Notification.Name("RemoteCommandNext")
+    static let remoteCommandPrevious = Notification.Name("RemoteCommandPrevious")
 }

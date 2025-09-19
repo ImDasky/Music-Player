@@ -96,6 +96,8 @@ final class MusicPlayer: ObservableObject {
 
     init() {
         NotificationCenter.default.addObserver(self, selector: #selector(onPlaybackFinished(_:)), name: .audioPlayerDidFinish, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(onRemoteNext(_:)), name: .remoteCommandNext, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(onRemotePrevious(_:)), name: .remoteCommandPrevious, object: nil)
     }
     
     deinit {
@@ -139,6 +141,14 @@ final class MusicPlayer: ObservableObject {
             // Temp stream finished: clear playing flag only
             // Optionally could auto-advance if we had a radio queue
         }
+    }
+
+    @objc private func onRemoteNext(_ notification: Notification) {
+        skipNext()
+    }
+    
+    @objc private func onRemotePrevious(_ notification: Notification) {
+        skipPrevious(currentTime: AudioPlayer.shared.currentTime)
     }
 
     func toggleShuffle() {
