@@ -16,6 +16,7 @@
 		B56E115C2E7BA6E80046E562 /* DownloadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B56E11592E7BA6E80046E562 /* DownloadManager.swift */; };
 		B56E115D2E7BA6E80046E562 /* AudioPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B56E115A2E7BA6E80046E562 /* AudioPlayer.swift */; };
 		B56E11632E7BA6EA0046E562 /* RecentlyPlayedStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B56E11622E7BA6E90046E562 /* RecentlyPlayedStore.swift */; };
+		B56E20002E7BA6F00046E562 /* PlaylistsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B56E20012E7BA6F00046E562 /* PlaylistsStore.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -31,6 +32,7 @@
 		B56E115A2E7BA6E80046E562 /* AudioPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPlayer.swift; sourceTree = "<group>"; };
 		B56E115F2E7BA6E80046E562 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B56E11622E7BA6E90046E562 /* RecentlyPlayedStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentlyPlayedStore.swift; sourceTree = "<group>"; };
+		B56E20012E7BA6F00046E562 /* PlaylistsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistsStore.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -70,6 +72,7 @@
 				B56E11592E7BA6E80046E562 /* DownloadManager.swift */,
 				B56E115A2E7BA6E80046E562 /* AudioPlayer.swift */,
 				B56E11622E7BA6E90046E562 /* RecentlyPlayedStore.swift */,
+				B56E20012E7BA6F00046E562 /* PlaylistsStore.swift */,
 				B56E115F2E7BA6E80046E562 /* Info.plist */,
 				B56E11532E7BA6E70046E562 /* Assets.xcassets */,
 				B56E11552E7BA6E70046E562 /* Music.entitlements */,
@@ -163,6 +166,7 @@
 				B56E115C2E7BA6E80046E562 /* DownloadManager.swift in Sources */,
 				B56E115D2E7BA6E80046E562 /* AudioPlayer.swift in Sources */,
 				B56E11632E7BA6EA0046E562 /* RecentlyPlayedStore.swift in Sources */,
+				B56E20002E7BA6F00046E562 /* PlaylistsStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

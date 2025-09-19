@@ -3,6 +3,7 @@ import UIKit
 import CoreData
 import AVFoundation
 import MediaPlayer
+import Combine
 
 // MARK: - BlurView (UIVisualEffectView wrapper)
 struct BlurView: UIViewRepresentable {
@@ -187,6 +188,20 @@ final class MusicPlayer: ObservableObject {
             queue.remove(at: existing)
         }
         queue.append(song)
+    }
+
+    // MARK: - Play a custom list (e.g., playlist)
+    func playPlaylist(songs: [Song], shuffle: Bool) {
+        guard !songs.isEmpty else { return }
+        isShuffling = shuffle
+        baseQueue = songs
+        // Build queue according to shuffle preference
+        rebuildPlayQueue(preserving: nil)
+        // Start from first item in the resulting queue
+        currentIndex = 0
+        let start = queue[0]
+        currentSong = start
+        AudioPlayer.shared.play(song: start)
     }
 
     @objc private func onPlaybackFinished(_ notification: Notification) {
@@ -1246,7 +1261,9 @@ struct SongRow: View {
     @EnvironmentObject var libraryManager: LibraryManager
     let song: Song
     @State private var showPlaylistSheet = false
-
+    @State private var newPlaylistName: String = ""
+    @ObservedObject private var playlists = PlaylistsStore.shared
+ 
     var body: some View {
         HStack {
             Button(action: { player.play(song: song) }) {
@@ -1290,29 +1307,149 @@ struct SongRow: View {
             }
         }
         .sheet(isPresented: $showPlaylistSheet) {
-            NavigationView {
-                VStack(spacing: 16) {
-                    Text("Add to Playlist")
-                        .font(.headline)
-                        .foregroundColor(.white)
-                    Text("Playlists coming soon.")
-                        .foregroundColor(.white.opacity(0.8))
-                    Button("Done") { showPlaylistSheet = false }
-                        .padding()
-                        .background(Color.white.opacity(0.2))
-                        .cornerRadius(8)
-                        .foregroundColor(.white)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color.black.ignoresSafeArea())
-                .navigationTitle("")
-            }
+            AddToPlaylistSheet(song: song) { showPlaylistSheet = false }
         }
     }
 }
 
 // MARK: - Placeholder sections
-struct PlaylistsView: View { var body: some View { Text("Playlists").foregroundColor(.white); Spacer() } }
+struct PlaylistsView: View {
+    @ObservedObject private var store = PlaylistsStore.shared
+    @Environment(\.managedObjectContext) private var viewContext
+    private let columns = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
+    @State private var isEditing: Bool = false
+    @State private var showingNewPlaylist: Bool = false
+    
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 12) {
+                    ForEach(store.playlists) { pl in
+                        ZStack(alignment: .topTrailing) {
+                            NavigationLink(destination: PlaylistDetailView(playlist: pl)) {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    ZStack {
+                                        RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.12))
+                                        Image(systemName: "music.note.list").foregroundColor(.white)
+                                    }
+                                    .frame(height: 120)
+                                    Text(pl.name)
+                                        .foregroundColor(.white)
+                                        .font(.headline)
+                                        .lineLimit(1)
+                                    Text("\(pl.songIds.count) song\(pl.songIds.count == 1 ? "" : "s")")
+                                        .foregroundColor(.white.opacity(0.7))
+                                        .font(.caption)
+                                }
+                                .padding(8)
+                                .background(Color.white.opacity(0.06))
+                                .cornerRadius(12)
+                            }
+                            .disabled(isEditing)
+
+                            if isEditing {
+                                Button(action: { store.deletePlaylist(pl.id) }) {
+                                    Image(systemName: "minus.circle.fill")
+                                        .foregroundColor(.red)
+                                        .shadow(radius: 1)
+                                }
+                                .padding(6)
+                            }
+                        }
+                    }
+                }
+                .padding(12)
+            }
+            .navigationTitle("Playlists")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    if isEditing {
+                        Button(action: { showingNewPlaylist = true }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "plus.circle")
+                                Text("New Playlist")
+                            }
+                        }
+                        .foregroundColor(.white)
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(isEditing ? "Done" : "Edit") { isEditing.toggle() }
+                        .foregroundColor(.white)
+                }
+            }
+        }
+        .sheet(isPresented: $showingNewPlaylist) {
+            NewPlaylistSheet { name in
+                _ = PlaylistsStore.shared.createPlaylist(named: name)
+                showingNewPlaylist = false
+            } onCancel: {
+                showingNewPlaylist = false
+            }
+        }
+    }
+}
+
+struct PlaylistDetailView: View {
+    let playlist: Playlist
+    @ObservedObject private var store = PlaylistsStore.shared
+    @Environment(\.managedObjectContext) private var viewContext
+    @EnvironmentObject var player: MusicPlayer
+    
+    private var songs: [Song] {
+        store.songs(for: playlist, context: viewContext)
+    }
+    
+    var body: some View {
+        VStack(spacing: 12) {
+            // Header controls
+            HStack(spacing: 12) {
+                Button(action: { player.playPlaylist(songs: songs, shuffle: false) }) {
+                    HStack {
+                        Image(systemName: "play.fill")
+                        Text("Play")
+                            .fontWeight(.semibold)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(Color.white)
+                    .foregroundColor(.black)
+                    .cornerRadius(12)
+                }
+                Button(action: { player.playPlaylist(songs: songs, shuffle: true) }) {
+                    HStack {
+                        Image(systemName: "shuffle")
+                        Text("Shuffle")
+                            .fontWeight(.semibold)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(Color.white.opacity(0.12))
+                    .foregroundColor(.white)
+                    .cornerRadius(12)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.white.opacity(0.3), lineWidth: 1)
+                    )
+                }
+            }
+            .padding(.horizontal)
+            
+            List {
+                ForEach(songs) { song in
+                    SongRow(song: song)
+                }
+                .onDelete { offsets in
+                    let ids = offsets.compactMap { songs[$0].id }
+                    for id in ids { store.removeSong(id, from: playlist.id) }
+                }
+            }
+            .listStyle(.plain)
+        }
+        .navigationTitle(playlist.name)
+    }
+}
+
 struct ArtistsView: View { var body: some View { Text("Artists").foregroundColor(.white); Spacer() } }
 struct AlbumsView: View { var body: some View { Text("Albums").foregroundColor(.white); Spacer() } }
 struct DownloadedView: View { var body: some View { Text("Downloaded").foregroundColor(.white); Spacer() } }
@@ -1574,6 +1711,110 @@ struct SearchView: View {
             .onAppear {
                 filteredLibrary = libraryManager.searchSongs(query: query)
             }
+        }
+    }
+}
+
+// MARK: - Add To Playlist Sheet (Apple Music style)
+struct AddToPlaylistSheet: View {
+    let song: Song
+    var onDismiss: () -> Void
+    @ObservedObject private var store = PlaylistsStore.shared
+    @State private var searchText: String = ""
+    @State private var showingNewPlaylist = false
+    
+    private var filtered: [Playlist] {
+        if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return store.playlists }
+        return store.playlists.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
+    }
+    
+    var body: some View {
+        NavigationView {
+            List {
+                if store.playlists.isEmpty {
+                    Text("No Playlists").foregroundColor(.white.opacity(0.7))
+                } else {
+                    ForEach(filtered) { pl in
+                        Button(action: {
+                            PlaylistsStore.shared.addSong(song, to: pl.id)
+                            onDismiss()
+                        }) {
+                            HStack(spacing: 12) {
+                                ZStack {
+                                    RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.12))
+                                    Image(systemName: "music.note.list").foregroundColor(.white)
+                                }
+                                .frame(width: 44, height: 44)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(pl.name).foregroundColor(.white).fontWeight(.semibold)
+                                    let count = pl.songIds.count
+                                    Text("\(count) song\(count == 1 ? "" : "s")")
+                                        .font(.caption)
+                                        .foregroundColor(.white.opacity(0.7))
+                                }
+                                Spacer()
+                                Image(systemName: "plus.circle.fill").foregroundColor(.white)
+                            }
+                        }
+                        .listRowBackground(Color.clear)
+                    }
+                }
+            }
+            .listStyle(.plain)
+            .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search Playlists")
+            .background(Color.black.ignoresSafeArea())
+            .navigationTitle("Add to a Playlist")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel", action: onDismiss).foregroundColor(.white)
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: { showingNewPlaylist = true }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "plus.circle")
+                            Text("New Playlist")
+                        }
+                    }
+                    .foregroundColor(.white)
+                }
+            }
+        }
+        .sheet(isPresented: $showingNewPlaylist) {
+            NewPlaylistSheet { name in
+                let p = PlaylistsStore.shared.createPlaylist(named: name)
+                PlaylistsStore.shared.addSong(song, to: p.id)
+                showingNewPlaylist = false
+                onDismiss()
+            } onCancel: {
+                showingNewPlaylist = false
+            }
+        }
+    }
+}
+
+struct NewPlaylistSheet: View {
+    var onCreate: (String) -> Void
+    var onCancel: () -> Void
+    @State private var name: String = ""
+    
+    var body: some View {
+        NavigationView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("New Playlist").font(.headline).foregroundColor(.white)
+                TextField("Playlist Name", text: $name)
+                    .textFieldStyle(.roundedBorder)
+                Spacer()
+            }
+            .padding()
+            .background(Color.black.ignoresSafeArea())
+            .navigationBarItems(
+                leading: Button("Cancel") { onCancel() }.foregroundColor(.white),
+                trailing: Button("Create") {
+                    let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { return }
+                    onCreate(trimmed)
+                }.foregroundColor(.white)
+            )
         }
     }
 }
