@@ -1,0 +1,1506 @@
+import SwiftUI
+import UIKit
+import CoreData
+import AVFoundation
+import MediaPlayer
+
+// MARK: - BlurView (UIVisualEffectView wrapper)
+struct BlurView: UIViewRepresentable {
+    let style: UIBlurEffect.Style
+    func makeUIView(context: Context) -> UIVisualEffectView {
+        UIVisualEffectView(effect: UIBlurEffect(style: style))
+    }
+    func updateUIView(_ uiView: UIVisualEffectView, context: Context) {
+        uiView.effect = UIBlurEffect(style: style)
+    }
+}
+
+// MARK: - Temporary Song for Playing
+struct TempSong: Identifiable, Hashable {
+    let id: UUID
+    let title: String
+    let artist: String
+    let artwork: String?
+    let album: String?
+    let url: String?
+    
+    init(from track: QobuzTrack) {
+        self.id = UUID()
+        self.title = track.title
+        self.artist = track.artist
+        self.artwork = track.image
+        self.album = track.album
+        self.url = track.url
+    }
+    
+    init(id: UUID = UUID(), title: String, artist: String, artwork: String?, album: String?, url: String?) {
+        self.id = id
+        self.title = title
+        self.artist = artist
+        self.artwork = artwork
+        self.album = album
+        self.url = url
+    }
+}
+
+// MARK: - Qobuz API Models
+struct QobuzResponse: Decodable {
+    let tracks: [QobuzTrack]?
+}
+
+struct QobuzTrack: Decodable {
+    let id: Int
+    let title: String
+    let artist: String
+    let album: String?
+    let image: String?
+    let url: String?
+}
+
+// MARK: - Circular Progress View
+struct CircularProgressView: View {
+    let progress: Double   // 0.0 ... 1.0
+    let size: CGFloat
+    let lineWidth: CGFloat
+    
+    private var clamped: Double { max(0.0, min(1.0, progress)) }
+    private var percentText: String { "\(Int(clamped * 100))%" }
+    
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(Color.white.opacity(0.15), lineWidth: lineWidth)
+            Circle()
+                .trim(from: 0, to: clamped)
+                .stroke(Color.white, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+            Text(percentText)
+                .font(.system(size: max(10, size * 0.28), weight: .bold))
+                .foregroundColor(.white)
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+// MARK: - Player + Library managers
+final class MusicPlayer: ObservableObject {
+    @Published var currentSong: Any? = nil // Can be Song or TempSong
+    @Published var isPlaying: Bool = false
+    @Published var queue: [Song] = [] // Play order (used by UI / Up Next)
+    private var baseQueue: [Song] = [] // Original order (recently added desc)
+    @Published var currentIndex: Int? = nil
+    @Published var isShuffling: Bool = false
+    @Published var repeatMode: RepeatMode = .off
+
+    enum RepeatMode { case off, one, all }
+
+    init() {
+        NotificationCenter.default.addObserver(self, selector: #selector(onPlaybackFinished(_:)), name: .audioPlayerDidFinish, object: nil)
+    }
+    
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    // MARK: - Queue management helpers for context menu
+    func addToPlayNext(_ song: Song) {
+        // Ensure there is a queue anchored at the current song if empty
+        if queue.isEmpty, let current = currentSong as? Song {
+            queue = [current]
+            currentIndex = 0
+        }
+        // If song already in queue, remove it to re-insert
+        if let idx = queue.firstIndex(of: song) { queue.remove(at: idx) }
+        let insertAt = ((currentIndex ?? -1) + 1)
+        let clamped = max(0, min(insertAt, queue.count))
+        queue.insert(song, at: clamped)
+    }
+
+    func addToPlayLast(_ song: Song) {
+        // Ensure there is a queue anchored at the current song if empty
+        if queue.isEmpty, let current = currentSong as? Song {
+            queue = [current]
+            currentIndex = 0
+        }
+        if let idx = queue.firstIndex(of: song) { queue.remove(at: idx) }
+        queue.append(song)
+    }
+
+    private func rebuildPlayQueue(preserving current: Song?) {
+        // Build play queue from base according to shuffle state
+        if isShuffling {
+            let shuffled = baseQueue.shuffled()
+            // Ensure current stays in queue
+            if let current, let idx = shuffled.firstIndex(of: current) {
+                // Keep as-is, we'll set currentIndex below
+                queue = shuffled
+                currentIndex = idx
+            } else {
+                queue = shuffled
+                currentIndex = nil
+            }
+        } else {
+            queue = baseQueue
+            if let current, let idx = baseQueue.firstIndex(of: current) {
+                currentIndex = idx
+            } else {
+                currentIndex = nil
+            }
+        }
+    }
+    
+    @objc private func onPlaybackFinished(_ notification: Notification) {
+        // Advance according to repeat mode and queue context
+        if let _ = currentSong as? Song {
+            // Library song with queue context
+            if repeatMode == .one {
+                AudioPlayer.shared.seek(to: 0)
+                AudioPlayer.shared.resume()
+                return
+            }
+            skipNext()
+        } else {
+            // Temp stream finished: clear playing flag only
+            // Optionally could auto-advance if we had a radio queue
+        }
+    }
+
+    func toggleShuffle() {
+        // Preserve currently playing library song if any
+        let currentLibrarySong = currentSong as? Song
+        isShuffling.toggle()
+        rebuildPlayQueue(preserving: currentLibrarySong)
+    }
+
+    func play(song: Song) {
+        currentSong = song
+        AudioPlayer.shared.play(song: song)
+        // isPlaying will be reflected by AudioPlayer.shared.isPlaying
+        if queue.isEmpty || (currentIndex == nil) {
+            // Build queue from all songs (latest added first)
+            let context = PersistenceController.shared.container.viewContext
+            let request: NSFetchRequest<Song> = Song.fetchRequest()
+            request.sortDescriptors = [NSSortDescriptor(key: "dateAdded", ascending: false)]
+            let all = (try? context.fetch(request)) ?? []
+            baseQueue = all
+            rebuildPlayQueue(preserving: song)
+        } else {
+            // Ensure index aligns with current play queue
+            if let idx = queue.firstIndex(of: song) { currentIndex = idx }
+        }
+    }
+    
+    func play(tempSong: TempSong) {
+        currentSong = tempSong
+        AudioPlayer.shared.play(tempSong: tempSong)
+        
+        // Clear queue context when streaming temp content
+        currentIndex = nil
+        queue = []
+    }
+    
+    func playFromQobuz(track: QobuzTrack) {
+        // Create a temporary Song object for playing
+        let tempSong = TempSong(from: track)
+        currentSong = tempSong
+        
+        // Route streaming playback through the central AudioPlayer for consistent state
+        AudioPlayer.shared.play(tempSong: tempSong)
+        currentIndex = nil
+        queue = []
+    }
+    
+    func skipNext() {
+        guard !queue.isEmpty else { return }
+        if repeatMode == .one {
+            AudioPlayer.shared.seek(to: 0)
+            AudioPlayer.shared.resume()
+            return
+        }
+        if let idx = currentIndex {
+            if isShuffling {
+                // pick a random different index
+                if queue.count == 1 {
+                    play(song: queue[0]); currentIndex = 0; return
+ 
+                var newIndex = idx
+                while newIndex == idx { newIndex = Int.random(in: 0..<queue.count) }
+                currentIndex = newIndex
+                play(song: queue[newIndex])
+            } else {
+                let nextIndex = idx + 1
+                if nextIndex < queue.count {
+                    currentIndex = nextIndex
+                    play(song: queue[nextIndex])
+  else if repeatMode == .all {
+                    currentIndex = 0
+                    play(song: queue[0])
+ 
+            }
+        }
+    }
+    
+    func skipPrevious(currentTime: TimeInterval) {
+        if repeatMode == .one {
+            AudioPlayer.shared.seek(to: 0)
+            AudioPlayer.shared.resume()
+            return
+        }
+        if currentTime > 3 { AudioPlayer.shared.seek(to: 0); return }
+        guard !queue.isEmpty else { AudioPlayer.shared.seek(to: 0); return }
+        guard let idx = currentIndex else { AudioPlayer.shared.seek(to: 0); return }
+        if isShuffling {
+            if queue.count == 1 { play(song: queue[0]); currentIndex = 0; return }
+            var newIndex = idx
+            while newIndex == idx { newIndex = Int.random(in: 0..<queue.count) }
+            currentIndex = newIndex
+            play(song: queue[newIndex])
+        } else if idx - 1 >= 0 {
+            let prev = queue[idx - 1]
+            currentIndex = idx - 1
+            play(song: prev)
+        } else if repeatMode == .all {
+            let lastIndex = max(queue.count - 1, 0)
+            currentIndex = lastIndex
+            play(song: queue[lastIndex])
+        } else {
+            AudioPlayer.shared.seek(to: 0)
+        }
+    }
+    
+    func togglePlayPause() {
+        if AudioPlayer.shared.isPlaying {
+            AudioPlayer.shared.pause()
+        } else {
+            AudioPlayer.shared.resume()
+        }
+    }
+}
+
+final class LibraryManager: ObservableObject {
+    private let viewContext: NSManagedObjectContext
+    private let persistenceController: PersistenceController
+    
+    init(context: NSManagedObjectContext, persistenceController: PersistenceController) {
+        self.viewContext = context
+        self.persistenceController = persistenceController
+    }
+    
+    func addSong(title: String, artist: String, artwork: String? = nil, album: String? = nil, url: String? = nil, qobuzTrackId: Int? = nil) -> Bool {
+        // Check if song already exists
+        let existingSongs = getAllSongs()
+        let songExists = existingSongs.contains { song in
+            song.title == title && song.artist == artist
+        }
+        
+        if !songExists {
+            let song = Song(context: viewContext)
+            song.id = UUID()
+            song.title = title
+            song.artist = artist
+            song.artwork = artwork
+            song.album = album
+            song.url = url
+            song.qobuzTrackId = Int32(qobuzTrackId ?? 0)
+            song.dateAdded = Date()
+            song.downloadStatus = DownloadStatus.downloading.rawValue // Start downloading immediately
+            persistenceController.save()
+            
+            // Start download immediately when adding to library
+            if let trackId = qobuzTrackId {
+                DownloadManager.shared.downloadSongFromQobuz(song, trackId: trackId, context: viewContext)
+            } else {
+                DownloadManager.shared.downloadSong(song, context: viewContext)
+            }
+            return true // Successfully added
+        }
+        return false // Already exists
+    }
+    
+    func addSong(from qobuzTrack: QobuzTrack) -> Bool {
+        return addSong(
+            title: qobuzTrack.title,
+            artist: qobuzTrack.artist,
+            artwork: qobuzTrack.image,
+            album: qobuzTrack.album,
+            url: qobuzTrack.url,
+            qobuzTrackId: qobuzTrack.id
+        )
+    }
+    
+    // Find matching song already in library (by title/artist or album)
+    func findSongMatching(track: QobuzTrack) -> Song? {
+        let request: NSFetchRequest<Song> = Song.fetchRequest()
+        if let album = track.album {
+            request.predicate = NSPredicate(format: "(title ==[cd] %@ AND artist ==[cd] %@) OR (album ==[cd] %@)", track.title, track.artist, album)
+        } else {
+            request.predicate = NSPredicate(format: "title ==[cd] %@ AND artist ==[cd] %@", track.title, track.artist)
+        }
+        request.fetchLimit = 1
+        do { return try viewContext.fetch(request).first } catch { return nil }
+    }
+
+    func deleteSong(_ song: Song) {
+        // Delete downloaded file if it exists
+        DownloadManager.shared.deleteDownloadedFile(for: song)
+        viewContext.delete(song)
+        persistenceController.save()
+    }
+    
+    func searchSongs(query: String) -> [Song] {
+        if query.isEmpty {
+            return getAllSongs()
+        } else {
+            return searchSongsInDatabase(query: query)
+        }
+    }
+    
+    func isSongInLibrary(title: String, artist: String) -> Bool {
+        let existingSongs = getAllSongs()
+        return existingSongs.contains { song in
+            song.title == title && song.artist == artist
+        }
+    }
+    
+    // MARK: - Private Helper Methods
+    private func getAllSongs() -> [Song] {
+        let request: NSFetchRequest<Song> = Song.fetchRequest()
+        let sortDescriptor = NSSortDescriptor(key: "dateAdded", ascending: false)
+        request.sortDescriptors = [sortDescriptor]
+        
+        do {
+            return try viewContext.fetch(request)
+        } catch {
+            print("Error fetching songs: \(error)")
+            return []
+        }
+    }
+    
+    private func searchSongsInDatabase(query: String) -> [Song] {
+        let request: NSFetchRequest<Song> = Song.fetchRequest()
+        request.predicate = NSPredicate(format: "title CONTAINS[cd] %@ OR artist CONTAINS[cd] %@ OR album CONTAINS[cd] %@", query, query, query)
+        let sortDescriptor = NSSortDescriptor(key: "dateAdded", ascending: false)
+        request.sortDescriptors = [sortDescriptor]
+        
+        do {
+            return try viewContext.fetch(request)
+        } catch {
+            print("Error searching songs: \(error)")
+            return []
+        }
+    }
+}
+
+// MARK: - Qobuz API Client
+final class QobuzAPI: ObservableObject {
+    @Published var results: [QobuzTrack] = []
+
+    func search(query: String) {
+        guard let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "https://www.qobuz.com/v4/us-en/catalog/search/autosuggest?q=\(encoded)") else { return }
+
+        var request = URLRequest(url: url)
+        request.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+
+        URLSession.shared.dataTask(with: request) { data, _, error in
+            if let data = data {
+                do {
+                    let decoded = try JSONDecoder().decode(QobuzResponse.self, from: data)
+                    DispatchQueue.main.async {
+                        self.results = decoded.tracks ?? []
+     
+  catch {
+                    print("Decoding error:", error)
+ 
+            } else if let error = error {
+                print("Request error:", error)
+            }
+        }.resume()
+    }
+}
+
+// MARK: - ContentView
+struct ContentView: View {
+    @Environment(\.managedObjectContext) private var viewContext
+    @StateObject private var player = MusicPlayer()
+    @StateObject private var libraryManager: LibraryManager
+    
+    private let miniPlayerBottomPadding: CGFloat = 0
+
+    init() {
+        let persistenceController = PersistenceController.shared
+        let context = persistenceController.container.viewContext
+        let manager = LibraryManager(context: context, persistenceController: persistenceController)
+        _libraryManager = StateObject(wrappedValue: manager)
+    }
+
+    var body: some View {
+        TabView {
+            // Library Tab
+            ZStack(alignment: .bottom) {
+                LibraryView()
+                    .environmentObject(player)
+                    .environmentObject(libraryManager)
+                    .environment(\.managedObjectContext, viewContext)
+
+                if player.currentSong != nil {
+                    NowPlayingBar()
+                        .environmentObject(player)
+                        .padding(.bottom, miniPlayerBottomPadding)
+ 
+            }
+            .tabItem {
+                ZStack {
+                    Image(systemName: "rectangle.stack.fill")
+                    Image(systemName: "music.note")
+                        .offset(x: 8, y: 8)
+ 
+                Text("Library")
+            }
+
+            // Radio Tab
+            ZStack(alignment: .bottom) {
+                RadioView()
+                if player.currentSong != nil {
+                    NowPlayingBar()
+                        .environmentObject(player)
+                        .padding(.bottom, miniPlayerBottomPadding)
+ 
+            }
+            .tabItem {
+                Label("Radio", systemImage: "dot.radiowaves.left.and.right")
+            }
+
+            // Search Tab
+            ZStack(alignment: .bottom) {
+                SearchView()
+                    .environmentObject(player)
+                    .environmentObject(libraryManager)
+                    .environment(\.managedObjectContext, viewContext)
+                if player.currentSong != nil {
+                    NowPlayingBar()
+                        .environmentObject(player)
+                        .padding(.bottom, miniPlayerBottomPadding)
+ 
+            }
+            .tabItem {
+                Label("Search", systemImage: "magnifyingglass")
+            }
+        }
+        .accentColor(.white)
+    }
+}
+
+// MARK: - NowPlayingBar
+struct NowPlayingBar: View {
+    @EnvironmentObject var player: MusicPlayer
+    @State private var showFullPlayer = false
+    @ObservedObject private var audio = AudioPlayer.shared
+    @Environment(\.managedObjectContext) private var viewContext
+
+    private let blurStyle: UIBlurEffect.Style = .systemChromeMaterialDark
+
+    private func skipForward() { player.skipNext() }
+    private func skipBackward() { player.skipPrevious(currentTime: audio.currentTime) }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Rectangle()
+                .fill(Color.white.opacity(0.06))
+                .frame(height: 0.5)
+
+            HStack(spacing: 14) {
+                if let song = player.currentSong as? Song {
+                    // Core Data Song
+                    LocalArtworkView(song: song, size: 52)
+                        .id(song.objectID)
+  else if let tempSong = player.currentSong as? TempSong {
+                    // Temporary Song from Qobuz
+                    if let art = tempSong.artwork, let url = URL(string: art) {
+                        AsyncImage(url: url) { phase in
+                            if let image = phase.image {
+                                image.resizable()
+              else if phase.error != nil {
+                                Image(systemName: "exclamationmark.triangle")
+                                    .resizable()
+                                    .foregroundColor(.gray)
+              else {
+                                Image(systemName: "music.note")
+                                    .resizable()
+                                    .foregroundColor(.gray)
+             
+         
+                        .frame(width: 52, height: 52)
+                        .cornerRadius(6)
+      else {
+                        Image(systemName: tempSong.artwork ?? "music.note")
+                            .resizable()
+                            .frame(width: 52, height: 52)
+                            .cornerRadius(6)
+     
+ 
+
+                VStack(alignment: .leading) {
+                    if let song = player.currentSong as? Song {
+                        Text(song.title ?? "Unknown Title")
+                            .font(.subheadline).fontWeight(.semibold).foregroundColor(.white)
+                        Text(song.artist ?? "Unknown Artist")
+                            .font(.caption).foregroundColor(.white.opacity(0.8))
+      else if let tempSong = player.currentSong as? TempSong {
+                        Text(tempSong.title)
+                            .font(.subheadline).fontWeight(.semibold).foregroundColor(.white)
+                        Text(tempSong.artist)
+                            .font(.caption).foregroundColor(.white.opacity(0.8))
+     
+ 
+                Spacer()
+
+                HStack(spacing: 18) {
+                    Button(action: { audio.isPlaying ? AudioPlayer.shared.pause() : AudioPlayer.shared.resume() }) {
+                        Image(systemName: audio.isPlaying ? "pause.fill" : "play.fill")
+                            .foregroundColor(.white)
+                            .font(.system(size: 20, weight: .bold))
+     
+                    Button(action: { skipForward() }) {
+                        Image(systemName: "forward.fill")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(.white)
+     
+ 
+            }
+            .padding(.vertical, 6)
+            .padding(.horizontal, 12)
+            .contentShape(Rectangle())
+            .onTapGesture { showFullPlayer.toggle() }
+            .sheet(isPresented: $showFullPlayer) {
+                FullPlayerView()
+                    .environmentObject(player)
+            }
+        }
+        .background(
+            ZStack {
+                BlurView(style: blurStyle)
+                Color(white: 0.06).opacity(0.25)
+            }
+        )
+    }
+}
+
+// MARK: - FullPlayerView
+struct FullPlayerView: View {
+    @EnvironmentObject var player: MusicPlayer
+    @ObservedObject private var audio = AudioPlayer.shared
+    @Environment(\.managedObjectContext) private var viewContext
+    @State private var isScrubbing = false
+    @State private var tempTime: Double = 0
+    @State private var showUpNext = false
+
+    // Use MusicPlayer's repeat mode
+
+    private func format(_ t: TimeInterval) -> String {
+        guard t.isFinite && !t.isNaN else { return "0:00" }
+        let total = Int(t.rounded())
+        let m = total / 60, s = total % 60
+        return String(format: "%d:%02d", m, s)
+    }
+    private func skipForward() { player.skipNext() }
+    private func skipBackward() { player.skipPrevious(currentTime: audio.currentTime) }
+
+    var body: some View {
+                    VStack(spacing: 20) {
+                Capsule().fill(Color.white.opacity(0.25)).frame(width: 40, height: 5).padding(.top, 8)
+
+                // Artwork
+                if let song = player.currentSong as? Song {
+                    LocalArtworkView(song: song, size: 300)
+                        .id(song.objectID)
+                        .frame(width: 300, height: 300)
+                        .cornerRadius(16)
+                        .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 12)
+                        .offset(y: -70)
+  else if let tempSong = player.currentSong as? TempSong, let art = tempSong.artwork, let url = URL(string: art) {
+                    AsyncImage(url: url) { phase in
+                        if let image = phase.image {
+                            image.resizable().scaledToFill()
+          else if phase.error != nil {
+                            Image(systemName: "exclamationmark.triangle").resizable().scaledToFit().foregroundColor(.gray)
+          else {
+                            Image(systemName: "music.note").resizable().scaledToFit().foregroundColor(.gray)
+         
+     
+                    .frame(width: 300, height: 300)
+                    .cornerRadius(16)
+                    .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 12)
+                    .offset(y: -70)
+ 
+
+                // Titles
+                VStack(alignment: .leading, spacing: 4) {
+                    if let song = player.currentSong as? Song {
+                        Text(song.title ?? "Unknown Title").font(.title).fontWeight(.bold).foregroundColor(.white)
+                        Text(song.artist ?? "Unknown Artist").font(.subheadline).foregroundColor(.white.opacity(0.85))
+      else if let tempSong = player.currentSong as? TempSong {
+                        Text(tempSong.title).font(.title).fontWeight(.bold).foregroundColor(.white)
+                        Text(tempSong.artist).font(.subheadline).foregroundColor(.white.opacity(0.85))
+     
+ 
+                .padding(.top, 4)
+                .padding(.leading, 20)
+                .padding(.leading, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                .offset(y: -8)
+
+                // Scrubber
+                VStack(spacing: 6) {
+                    LineScrubber(currentTime: Binding(
+                        get: { isScrubbing ? tempTime : audio.currentTime },
+                        set: { newVal in
+                            tempTime = max(0, min(newVal, max(audio.duration, 0)))
+         
+                    ), duration: audio.duration, onCommit: {
+                        AudioPlayer.shared.seek(to: tempTime)
+     , onBegin: {
+                        isScrubbing = true
+                        tempTime = audio.currentTime
+     , onEnd: {
+                        isScrubbing = false
+     )
+ 
+                .padding(.horizontal)
+                .padding(.top, 6)
+
+                // Playback controls
+                HStack(spacing: 32) {
+                    Button(action: { player.toggleShuffle() }) {
+                        Image(systemName: "shuffle")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(player.isShuffling ? .white : .white.opacity(0.6))
+     
+                    Button(action: { skipBackward() }) {
+                        Image(systemName: "backward.fill")
+                            .font(.system(size: 24, weight: .medium))
+                            .foregroundColor(.white)
+     
+                    Button(action: {
+                        if audio.isPlaying { AudioPlayer.shared.pause() } else { AudioPlayer.shared.resume() }
+     ) {
+                        ZStack {
+                            Image(systemName: "pause.fill")
+                                .opacity(audio.isPlaying ? 1 : 0)
+                            Image(systemName: "play.fill")
+                                .opacity(audio.isPlaying ? 0 : 1)
+         
+                        .font(.system(size: 40, weight: .bold))
+                        .foregroundColor(.white)
+                        .frame(width: 48, height: 48)
+     
+                    Button(action: { skipForward() }) {
+                        Image(systemName: "forward.fill")
+                            .font(.system(size: 24, weight: .medium))
+                            .foregroundColor(.white)
+     
+                    Button(action: {
+                        switch player.repeatMode { case .off: player.repeatMode = .one; case .one: player.repeatMode = .all; case .all: player.repeatMode = .off }
+     ) {
+                        let symbol: String = (player.repeatMode == .off ? "repeat" : (player.repeatMode == .one ? "repeat.1" : "repeat"))
+                        Image(systemName: symbol)
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(player.repeatMode == .off ? .white.opacity(0.6) : .white)
+     
+ 
+                .font(.title2)
+
+                // Volume (custom bar) above Up Next
+                VolumeBar(value: Binding(get: { AudioPlayer.shared.volume }, set: { AudioPlayer.shared.setVolume($0) }))
+                    .padding(.horizontal)
+                    .padding(.top, 10)
+
+                // Volume
+                // Keeping system VolumeView hidden to preserve hardware control behavior if needed
+                VolumeView()
+                    .frame(height: 0)
+                    .opacity(0)
+
+                // Up Next / Options row
+                HStack {
+                    Button(action: { showUpNext.toggle() }) {
+                        HStack(spacing: 8) {
+                            // Animate bubble layout when selection changes
+                            Image(systemName: "text.line.first.and.arrowtriangle.forward").foregroundColor(.white)
+                            Text("Up Next").foregroundColor(.white)
+         
+                        .padding(.leading, 24)
+     
+                    Spacer()
+                    Menu {
+                        Picker("Quality", selection: Binding(get: { AudioPlayer.shared.audioQuality }, set: { AudioPlayer.shared.setAudioQuality($0) })) {
+                            ForEach(AudioPlayer.AudioQuality.allCases, id: \.self) { q in
+                                Text(q.rawValue).tag(q)
+             
+         
+      label: {
+                        Image(systemName: "ellipsis.circle").foregroundColor(.white).font(.title3)
+     
+ 
+                .padding(.horizontal)
+
+            }
+            .padding(.top, 120)
+            .overlay(alignment: .top) {
+                Capsule()
+                    .fill(Color.white.opacity(0.25))
+                    .frame(width: 40, height: 5)
+                    .padding(.top, 8)
+            }
+            .padding(.bottom, 40)
+            .background(Color.black.ignoresSafeArea())
+            .sheet(isPresented: $showUpNext) {
+                UpNextView().environmentObject(player)
+            }
+    }
+}
+
+// Custom volume bar matching scrubber aesthetic
+struct VolumeBar: View {
+    @Binding var value: Float
+    @State private var isDragging = false
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: "speaker.fill")
+                .foregroundColor(.white.opacity(0.6))
+                .font(.system(size: 14, weight: .regular))
+
+            GeometryReader { geo in
+                ZStack {
+                    VStack {
+                        Spacer()
+                        ZStack(alignment: .leading) {
+                    // Animate the entire ZStack content changes
+                            Capsule().fill(Color.white.opacity(0.2)).frame(height: 6)
+                            Capsule().fill(Color.white.opacity(0.6))
+                                .frame(width: max(0, min(CGFloat(value) * geo.size.width, geo.size.width)), height: 6)
+         
+                        Spacer()
+     
+ 
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0)
+                    .onChanged { g in
+                        isDragging = true
+                        let x = max(0, min(g.location.x, geo.size.width))
+                        let ratio = (geo.size.width > 0 ? x / geo.size.width : 0)
+                        value = Float(ratio)
+     
+                    .onEnded { _ in
+                        isDragging = false
+     
+                )
+            }
+            .frame(height: 28)
+
+            Image(systemName: "speaker.wave.3.fill")
+                .foregroundColor(.white.opacity(0.6))
+                .font(.system(size: 14, weight: .regular))
+        }
+        .frame(height: 28)
+    }
+}
+
+// MARK: - Volume slider wrapper
+struct VolumeView: UIViewRepresentable {
+    func makeUIView(context: Context) -> MPVolumeView { MPVolumeView(frame: .zero) }
+    func updateUIView(_ view: MPVolumeView, context: Context) {}
+}
+
+struct LineScrubber: View {
+    @Binding var currentTime: Double
+    let duration: Double
+    var onCommit: () -> Void
+    var onBegin: () -> Void
+    var onEnd: () -> Void
+    @State private var started = false
+
+    private func format(_ t: Double) -> String {
+        guard t.isFinite && !t.isNaN else { return "0:00" }
+        let total = Int(t.rounded())
+        let m = total / 60, s = total % 60
+        return String(format: "%d:%02d", m, s)
+    }
+
+    var body: some View {
+        VStack(spacing: 6) {
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    // Animate the entire ZStack content changes
+                    Capsule().fill(Color.white.opacity(0.25)).frame(height: 5)
+                    Capsule().fill(Color.white).frame(width: progressWidth(total: geo.size.width), height: 5)
+ 
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        if !started { started = true; onBegin() }
+                        let x = max(0, min(value.location.x, geo.size.width))
+                        let ratio = (geo.size.width > 0 ? Double(x / geo.size.width) : 0)
+                        currentTime = ratio * max(duration, 0)
+     
+                    .onEnded { _ in
+                        onCommit()
+                        onEnd()
+                        started = false
+     
+                )
+            }
+            .frame(height: 28)
+
+            HStack {
+                Text(format(currentTime)).font(.caption2).foregroundColor(.white.opacity(0.8))
+                Spacer()
+                Text(format(duration)).font(.caption2).foregroundColor(.white.opacity(0.8))
+            }
+        }
+    }
+
+    private func progressWidth(total: CGFloat) -> CGFloat {
+        guard duration > 0 else { return 0 }
+        let ratio = CGFloat(currentTime / duration)
+        return max(0, min(ratio * total, total))
+    }
+}
+
+struct UpNextView: View {
+    @EnvironmentObject var player: MusicPlayer
+    var body: some View {
+        NavigationView {
+            List {
+                if let idx = player.currentIndex {
+                    let upcoming = Array(player.queue.dropFirst(idx + 1))
+                    Section(header: Text("Up Next").foregroundColor(.white)) {
+                        ForEach(upcoming) { song in
+                            HStack {
+                                LocalArtworkView(song: song, size: 44)
+                                VStack(alignment: .leading) {
+                                    Text(song.title ?? "Unknown Title").foregroundColor(.white)
+                                    Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
+                 
+             
+                            .contentShape(Rectangle())
+                            .onTapGesture { player.play(song: song) }
+                            .listRowBackground(Color.clear)
+         
+                        if upcoming.isEmpty {
+                            Text("No upcoming songs").foregroundColor(.white.opacity(0.6))
+                                .listRowBackground(Color.clear)
+         
+     
+  else if let temp = player.currentSong as? TempSong {
+                    Section(header: Text("Now Playing").foregroundColor(.white)) {
+                        HStack {
+                            if let art = temp.artwork, let url = URL(string: art) {
+                                AsyncImage(url: url) { p in (p.image?.resizable()) ?? Image(systemName: "music.note").resizable() }
+                                    .frame(width: 44, height: 44).cornerRadius(6)
+             
+                            VStack(alignment: .leading) {
+                                Text(temp.title).foregroundColor(.white)
+                                Text(temp.artist).font(.caption).foregroundColor(.white.opacity(0.8))
+             
+         
+                        .listRowBackground(Color.clear)
+     
+ 
+            }
+            .navigationTitle("Up Next")
+        }
+    }
+}
+
+// MARK: - Local artwork extractor
+final class ArtworkImageCache {
+    static let shared = NSCache<NSString, UIImage>()
+}
+
+struct LocalArtworkView: View {
+    @ObservedObject var song: Song
+    let size: CGFloat
+    @State private var image: UIImage?
+    @State private var retryAttempts: Int = 0
+    
+    var body: some View {
+        ZStack {
+            Group {
+                if let image {
+                    Image(uiImage: image).resizable().scaledToFill()
+  else if let art = song.artwork, art.hasPrefix("http"), let url = URL(string: art) {
+                    AsyncImage(url: url) { phase in
+                        if let img = phase.image { img.resizable().scaledToFill() }
+                        else { Image(systemName: "music.note").resizable().foregroundColor(.gray) }
+     
+  else {
+                    Image(systemName: "music.note").resizable().foregroundColor(.gray)
+ 
+            }
+            .frame(width: size, height: size)
+            .clipped()
+            .cornerRadius(size < 100 ? 6 : 12)
+            
+            // Progress overlay for downloading/queued
+            ProgressOverlay(song: song, diameter: size * 0.7)
+        }
+        .onAppear(perform: load)
+        .onChange(of: song.artwork) { _ in load() }
+        .onChange(of: song.localFilePath) { _ in load() }
+        .onChange(of: song.downloadStatus) { newStatus in
+            if newStatus == DownloadStatus.downloaded.rawValue { load() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .artworkUpdated)) { notif in
+            if let id = notif.userInfo?["songId"] as? UUID, id == song.id {
+                load()
+            }
+        }
+    }
+    
+    private func load() {
+        // Determine best local artwork path to load
+        let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        var preferredPath: String? = nil
+        if let id = song.id {
+            let defaultLocal = documentsDirectory.appendingPathComponent("Artwork", isDirectory: true).appendingPathComponent("\(id.uuidString).jpg").path
+            if FileManager.default.fileExists(atPath: defaultLocal) { preferredPath = defaultLocal }
+        }
+        if preferredPath == nil, let art = song.artwork, !art.isEmpty, !art.hasPrefix("http") {
+            preferredPath = art
+        }
+        guard let pathToLoad = preferredPath else {
+            // No local artwork available right now; retry in case it appears shortly
+            image = nil
+            scheduleRetry()
+            return
+        }
+        let cacheKey = NSString(string: "\(pathToLoad)|\(Int(size))")
+        if let cached = ArtworkImageCache.shared.object(forKey: cacheKey) {
+            image = cached
+            return
+        }
+        let fileExists = FileManager.default.fileExists(atPath: pathToLoad)
+        guard fileExists else {
+            // File may be written momentarily; retry briefly a few times
+            scheduleRetry()
+            image = nil
+            return
+        }
+        let targetSize = CGSize(width: size * UIScreen.main.scale, height: size * UIScreen.main.scale)
+        DispatchQueue.global(qos: .userInitiated).async {
+            var ui = downsampleImage(atPath: pathToLoad, to: targetSize)
+            // Fallback to direct load if downsample failed but file exists
+            if ui == nil, let direct = UIImage(contentsOfFile: pathToLoad) {
+                ui = direct
+            }
+            DispatchQueue.main.async {
+                if let ui {
+                    ArtworkImageCache.shared.setObject(ui, forKey: cacheKey)
+                    image = ui
+                    retryAttempts = 0
+  else {
+                    // If decode failed, retry shortly in case file is still being finalized
+                    image = nil
+                    scheduleRetry()
+ 
+            }
+        }
+    }
+    
+    private func scheduleRetry() {
+        guard retryAttempts < 3 else { return }
+        retryAttempts += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            load()
+        }
+    }
+}
+
+// MARK: - Progress Overlay helper
+struct ProgressOverlay: View {
+    @ObservedObject var manager = DownloadManager.shared
+    @ObservedObject var song: Song
+    let diameter: CGFloat
+    
+    private var show: Bool {
+        guard let status = song.downloadStatus else { return false }
+        return status == DownloadStatus.downloading.rawValue || status == DownloadStatus.queued.rawValue
+    }
+    
+    private var progressValue: Double {
+        guard let id = song.id, let p = manager.activeDownloads[id] else { return 0 }
+        // If totalBytes is a fake 100 from poller, percentage will be downloadedBytes/100.
+        return max(0.0, min(1.0, p.totalBytes == 0 ? 0 : Double(p.downloadedBytes) / Double(p.totalBytes)))
+    }
+    
+    var body: some View {
+        Group {
+            if show {
+                Circle()
+                    .fill(Color.black.opacity(0.35))
+                    .frame(width: diameter + 18, height: diameter + 18)
+                    .overlay(
+                        CircularProgressView(progress: progressValue, size: diameter, lineWidth: max(3, diameter * 0.08))
+                    )
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: show)
+    }
+}
+
+private func downsampleImage(atPath path: String, to size: CGSize) -> UIImage? {
+    let url = URL(fileURLWithPath: path)
+    let options: [CFString: Any] = [
+        kCGImageSourceShouldCache: false
+    ]
+    guard let src = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary) else { return nil }
+    let maxDim = max(size.width, size.height)
+    let downsampleOptions: [CFString: Any] = [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceShouldCacheImmediately: true,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+        kCGImageSourceThumbnailMaxPixelSize: max(1, Int(maxDim))
+    ]
+    guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, downsampleOptions as CFDictionary) else { return nil }
+    return UIImage(cgImage: cg)
+}
+
+// MARK: - Library (Apple Music style hub)
+enum LibrarySection: String, CaseIterable { case songs = "Songs", playlists = "Playlists", genres = "Genres", recents = "Recents" }
+
+struct LibraryView: View {
+    @Environment(\.managedObjectContext) private var viewContext
+    @State private var selection: LibrarySection = .songs
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 0) {
+                Picker("", selection: $selection) {
+                    ForEach(LibrarySection.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+ 
+                .pickerStyle(SegmentedPickerStyle())
+                .padding(.horizontal)
+                .padding(.top, 8)
+
+                Group {
+                    switch selection {
+                    case .songs: SongsRootView()
+                    case .playlists: PlaylistsView()
+                    case .genres: GenresView()
+                    case .recents: RecentlyPlayedView()
+     
+ 
+            }
+            .navigationTitle("Library")
+        }
+    }
+}
+
+// MARK: - Songs Root View (Recently Added only)
+struct SongsRootView: View {
+    @Environment(\.managedObjectContext) private var viewContext
+    @FetchRequest(
+        sortDescriptors: [NSSortDescriptor(keyPath: \Song.dateAdded, ascending: false)],
+        animation: .default)
+    private var songs: FetchedResults<Song>
+    
+    private var recentlyAdded: [Song] { Array(songs.prefix(6)) }
+    
+    @EnvironmentObject var player: MusicPlayer
+
+    var body: some View {
+        List {
+            if !recentlyAdded.isEmpty {
+                Section(header: Text("Recently Added").font(.title2).bold().foregroundColor(.white)) {
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 12) {
+                        ForEach(recentlyAdded) { song in
+                            VStack(alignment: .leading, spacing: 6) {
+                                LocalArtworkView(song: song, size: 110)
+                                    .id(song.objectID)
+                                Text(song.title ?? "Unknown").lineLimit(1).font(.caption).foregroundColor(.white)
+                                Text(song.artist ?? "Unknown").lineLimit(1).font(.caption2).foregroundColor(.white.opacity(0.7))
+             
+                            .padding(.horizontal, 4)
+                            .contentShape(Rectangle())
+                            .onTapGesture { player.play(song: song) }
+                            .listRowBackground(Color.clear)
+         
+     
+                    .listRowBackground(Color.clear)
+ 
+            }
+
+            Section(header: Text("All Songs").font(.headline).foregroundColor(.white)) {
+                ForEach(songs) { song in
+                    SongRow(song: song)
+                        .listRowBackground(Color.clear)
+ 
+            }
+
+            // Bottom spacer to ensure last items are reachable above overlays
+            Section {
+                Color.clear.frame(height: 160)
+                    .listRowBackground(Color.clear)
+            }
+        }
+        .listStyle(.plain)
+        .background(Color.clear)
+    }
+}
+
+// MARK: - Genres and Recently Played Views
+struct GenresView: View { var body: some View { Text("Genres").foregroundColor(.white); Spacer() } }
+
+struct RecentlyPlayedView: View {
+    @EnvironmentObject var player: MusicPlayer
+    @FetchRequest(
+        sortDescriptors: [NSSortDescriptor(keyPath: \Song.dateAdded, ascending: false)],
+        animation: .default)
+    private var songs: FetchedResults<Song>
+    @ObservedObject private var recents = RecentlyPlayedStore.shared
+
+    private var recentlyPlayed: [Song] {
+        let map = Dictionary(uniqueKeysWithValues: songs.compactMap { s in (s.id.map { ($0, s) }) })
+        return recents.items.compactMap { map[$0] }
+    }
+
+    var body: some View {
+        ScrollView(.vertical, showsIndicators: true) {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Recently Played").font(.title2).bold().foregroundColor(.white).padding(.horizontal)
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 12) {
+                    ForEach(recentlyPlayed) { song in
+                        VStack(alignment: .leading, spacing: 6) {
+                            LocalArtworkView(song: song, size: 110)
+                                .id(song.objectID)
+                            Text(song.title ?? "Unknown").lineLimit(1).font(.caption).foregroundColor(.white)
+                            Text(song.artist ?? "Unknown").lineLimit(1).font(.caption2).foregroundColor(.white.opacity(0.7))
+         
+                        .padding(.horizontal, 4)
+                        .contentShape(Rectangle())
+                        .onTapGesture { player.play(song: song) }
+     
+ 
+                .padding(.horizontal)
+            }
+            .padding(.top, 12)
+        }
+    }
+}
+
+// MARK: - Song Row (simple inline for now)
+struct SongRow: View {
+    @EnvironmentObject var player: MusicPlayer
+    @EnvironmentObject var libraryManager: LibraryManager
+    let song: Song
+
+    var body: some View {
+        HStack {
+            LocalArtworkView(song: song, size: 44)
+                .id(song.objectID)
+            VStack(alignment: .leading) {
+                Text(song.title ?? "Unknown Title").foregroundColor(.white)
+                Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
+            }
+            Spacer()
+            Menu {
+                Button("Play Next", action: { player.addToPlayNext(song) })
+ 
+ 
+                Button("Play Last", action: { player.addToPlayLast(song) })
+ 
+ 
+                Divider()
+                Button("Add to Playlist", action: { /* TODO: hook up playlists */ })
+ 
+ 
+                Divider()
+                Button("Delete from Library", role: .destructive, action: { libraryManager.deleteSong(song) })
+ 
+ 
+            } label: {
+                Image(systemName: "ellipsis")
+                    .foregroundColor(.white)
+                    .font(.system(size: 16, weight: .semibold))
+                    .padding(.leading, 4)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { player.play(song: song) }
+        .padding(.horizontal)
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            Button(role: .destructive) { libraryManager.deleteSong(song) } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+    }
+}
+
+// MARK: - Placeholder sections
+struct PlaylistsView: View { var body: some View { Text("Playlists").foregroundColor(.white); Spacer() } }
+struct ArtistsView: View { var body: some View { Text("Artists").foregroundColor(.white); Spacer() } }
+struct AlbumsView: View { var body: some View { Text("Albums").foregroundColor(.white); Spacer() } }
+struct DownloadedView: View { var body: some View { Text("Downloaded").foregroundColor(.white); Spacer() } }
+
+// MARK: - RadioView
+struct RadioView: View {
+    var body: some View {
+        NavigationView {
+            VStack {
+                Text("Radio").font(.largeTitle).foregroundColor(.white)
+                Spacer()
+            }
+            .navigationTitle("Radio")
+        }
+    }
+}
+
+// MARK: - SearchView
+enum SearchMode: String, CaseIterable {
+    case library = "Your Library"
+    case newMusic = "New Music"
+}
+
+enum SearchContentType: String, CaseIterable {
+    case track = "Track"
+    case artist = "Artist" 
+    case album = "Album"
+}
+
+struct SearchView: View {
+    @Environment(\.managedObjectContext) private var viewContext
+    @EnvironmentObject var player: MusicPlayer
+    @EnvironmentObject var libraryManager: LibraryManager
+    @StateObject private var qobuzAPI = QobuzAPI()
+
+    @State private var contentType: SearchContentType = .track
+    @State private var isSearching = false
+    @State private var showPicker: Bool = false
+    @State private var query = ""
+    @State private var mode: SearchMode = .library
+    @FocusState private var searchFocused: Bool
+    @State private var filteredLibrary: [Song] = []
+    @State private var addedSongs: Set<String> = [] // Track which songs were just added
+    @State private var addingSongs: Set<String> = [] // Track which songs are currently being added
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 12) {
+                TextField("Search", text: $query)
+                    .padding(10)
+                    .background(Color(white: 0.15).opacity(0.9))
+                    .cornerRadius(10)
+                    .foregroundColor(.white)
+                    .padding(.horizontal)
+                    .focused($searchFocused)
+                    .onSubmit {
+                        withAnimation(.easeOut(duration: 0.35)) {
+                            isSearching = true
+                            showPicker = false
+         
+                        searchFocused = false
+     
+                    .onChange(of: query) { newValue in
+                        if !isSearching {
+                            withAnimation(.easeOut(duration: 0.35)) {
+                                showPicker = searchFocused || !newValue.isEmpty
+             
+         
+                        if mode == .newMusic, !newValue.isEmpty {
+                            qobuzAPI.search(query: newValue)
+          else {
+                            filteredLibrary = libraryManager.searchSongs(query: newValue)
+         
+     
+                    .onChange(of: searchFocused) { focused in
+                        if focused {
+                            withAnimation(.easeOut(duration: 0.35)) {
+                                isSearching = false
+                                showPicker = true
+             
+          else if !isSearching {
+                            withAnimation(.easeOut(duration: 0.35)) {
+                                showPicker = !query.isEmpty
+             
+         
+     
+                // Segmented picker or bubbles occupy same space
+                ZStack(alignment: .leading) {
+                    // Animate the entire ZStack content changes
+                    if showPicker {
+                        Picker("", selection: $mode) {
+                            ForEach(SearchMode.allCases, id: \.self) { mode in
+                                Text(mode.rawValue).tag(mode)
+             
+         
+                        .pickerStyle(SegmentedPickerStyle())
+                        .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .move(edge: .top).combined(with: .opacity)))
+     
+                    if isSearching {
+                        HStack(spacing: 8) {
+                            ForEach(SearchContentType.allCases, id: \.self) { type in
+                                Button(action: {
+                                    withAnimation(.easeInOut(duration: 0.22)) { contentType = type }
+                 ) {
+                                    Text(type.rawValue)
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundColor(contentType == type ? .black : .white)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 6)
+                                        .background(
+                                            RoundedRectangle(cornerRadius: 14)
+                                                .fill(contentType == type ? Color.white : Color.white.opacity(0.2))
+                                        )
+                 
+                                .scaleEffect(contentType == type ? 1.0 : 0.96)
+                                .animation(.spring(response: 0.28, dampingFraction: 0.85), value: contentType)
+                                .buttonStyle(PlainButtonStyle())
+             
+         
+                        .padding(.leading, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity), removal: .move(edge: .bottom).combined(with: .opacity)))
+     
+ 
+                .animation(.easeInOut(duration: 0.35), value: showPicker || isSearching)
+                .frame(height: 34)
+                .padding(.horizontal)
+
+
+                List {
+                    if mode == .library {
+                        ForEach(filteredLibrary) { song in
+                            HStack {
+                                LocalArtworkView(song: song, size: 44)
+                                VStack(alignment: .leading) {
+                                    Text(song.title ?? "Unknown Title").foregroundColor(.white)
+                                    Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
+                                    
+                                    // Show status for downloading, queued, or failed
+                                    if song.downloadStatus == DownloadStatus.downloading.rawValue {
+                                        Text("Downloading...")
+                                            .font(.caption2)
+                                            .foregroundColor(.blue)
+                      else if song.downloadStatus == DownloadStatus.queued.rawValue {
+                                        Text("Queued...")
+                                            .font(.caption2)
+                                            .foregroundColor(.orange)
+                      else if song.downloadStatus == DownloadStatus.failed.rawValue {
+                                        Text("Failed")
+                                            .font(.caption2)
+                                            .foregroundColor(.red)
+                     
+                                    // Downloaded songs show nothing
+                 
+                                Spacer()
+             
+                            .contentShape(Rectangle())
+                            .onTapGesture { player.play(song: song) }
+                            .listRowBackground(Color.clear)
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) { libraryManager.deleteSong(song) } label: {
+                                    Label("Delete", systemImage: "trash")
+                 
+             
+         
+      else {
+                        ForEach(qobuzAPI.results, id: \.id) { track in
+                            HStack {
+                                if let art = track.image, let url = URL(string: art) {
+                                    AsyncImage(url: url) { phase in
+                                        if let image = phase.image {
+                                            image.resizable()
+                          else if phase.error != nil {
+                                            Image(systemName: "exclamationmark.triangle")
+                                                .resizable()
+                                                .foregroundColor(.gray)
+                          else {
+                                            Image(systemName: "music.note")
+                                                .resizable()
+                                                .foregroundColor(.gray)
+                         
+                     
+                                    .frame(width: 44, height: 44)
+                                    .cornerRadius(4)
+                 
+
+                                VStack(alignment: .leading) {
+                                    Text(track.title).foregroundColor(.white)
+                                    Text(track.artist).font(.caption).foregroundColor(.white.opacity(0.8))
+                                    if let album = track.album {
+                                        Text(album).font(.caption2).foregroundColor(.white.opacity(0.6))
+                     
+                 
+                                Spacer()
+                                
+                                let songKey = "\(track.title)-\(track.artist)"
+                                let isInLibrary = libraryManager.isSongInLibrary(title: track.title, artist: track.artist)
+                                let wasJustAdded = addedSongs.contains(songKey)
+                                let isAdding = addingSongs.contains(songKey)
+                                
+                                // Add to library button (which now downloads automatically)
+                                Button(action: {
+                                    if !isInLibrary && !isAdding {
+                                        addingSongs.insert(songKey)
+                                        
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                            let success = libraryManager.addSong(from: track)
+                                            addingSongs.remove(songKey)
+                                            
+                                            if success {
+                                                addedSongs.insert(songKey)
+                                                // Remove from added songs after 2 seconds
+                                                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                                                    addedSongs.remove(songKey)
+                                 
+                             
+                         
+                     
+                 ) {
+                                    Image(systemName: isInLibrary || wasJustAdded ? "checkmark" : "plus")
+                                        .foregroundColor(isInLibrary || wasJustAdded ? .red : .white)
+                                        .font(.system(size: 18, weight: .bold))
+                 
+                                .disabled(isInLibrary || isAdding)
+                                .buttonStyle(PlainButtonStyle())
+                                .scaleEffect(isAdding ? 1.2 : 1.0)
+                                .animation(.easeInOut(duration: 0.2), value: isAdding)
+             
+                            .listRowBackground(Color.clear)
+                            .contentShape(Rectangle()) // Make the row tappable
+                            .onTapGesture {
+                                // Prefer local if exists; else stream immediately
+                                if let localSong = libraryManager.findSongMatching(track: track),
+                                   let _ = DownloadManager.shared.getLocalFileURL(for: localSong) {
+                                    player.play(song: localSong)
+                  else {
+                                    // Show UI immediately with temp metadata
+                                    let temp = TempSong(from: track)
+                                    player.play(tempSong: temp) // sets UI state
+                                    // Resolve full stream URL via existing flow and play
+                                    DownloadManager.shared.resolveStreamURLForQobuz(trackId: track.id) { result in
+                                        DispatchQueue.main.async {
+                                            switch result {
+                                            case .success(let url):
+                                                let updated = TempSong(id: temp.id, title: temp.title, artist: temp.artist, artwork: temp.artwork, album: temp.album, url: url.absoluteString)
+                                                AudioPlayer.shared.play(tempSong: updated)
+                                            case .failure(let error):
+                                                print("Failed to resolve stream URL: \(error)")
+                             
+                         
+                     
+                 
+             
+         
+     
+ 
+            }
+            .navigationTitle("Search")
+            .onAppear {
+                filteredLibrary = libraryManager.searchSongs(query: query)
+            }
+        }
+    }
+}
