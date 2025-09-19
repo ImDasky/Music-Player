@@ -127,6 +127,68 @@ final class MusicPlayer: ObservableObject {
         }
     }
     
+    // MARK: - Queue management helpers
+    var upcoming: [Song] {
+        guard let idx = currentIndex, idx + 1 < queue.count else { return [] }
+        return Array(queue.suffix(from: idx + 1))
+    }
+
+    func removeUpcoming(at offsets: IndexSet) {
+        guard let idx = currentIndex else { return }
+        let absolute = offsets.map { $0 + idx + 1 }.sorted(by: >)
+        for i in absolute {
+            if i < queue.count { queue.remove(at: i) }
+        }
+    }
+
+    func moveUpcoming(from source: IndexSet, to destination: Int) {
+        guard let idx = currentIndex else { return }
+        let absDest = destination + idx + 1
+        let sortedSources = source.sorted()
+        var elements: [Song] = []
+        for s in sortedSources {
+            let abs = s + idx + 1
+            if abs < queue.count { elements.append(queue[abs]) }
+        }
+        // Remove from highest to lowest absolute index to keep indices valid
+        for abs in sortedSources.map({ $0 + idx + 1 }).sorted(by: >) {
+            if abs < queue.count { queue.remove(at: abs) }
+        }
+        var insertAt = min(absDest, queue.count)
+        for el in elements {
+            if insertAt > queue.count { insertAt = queue.count }
+            queue.insert(el, at: insertAt)
+            insertAt += 1
+        }
+    }
+
+    func clearUpcoming() {
+        guard let idx = currentIndex, idx + 1 <= queue.count else { return }
+        queue.removeSubrange((idx + 1)..<queue.count)
+    }
+
+    func enqueueNext(_ song: Song) {
+        if let existing = queue.firstIndex(of: song) {
+            // Adjust current index if needed when removing
+            if let idx = currentIndex, existing <= idx { currentIndex = max(0, idx - 1) }
+            queue.remove(at: existing)
+        }
+        if let idx = currentIndex {
+            let insertIdx = min(idx + 1, queue.count)
+            queue.insert(song, at: insertIdx)
+        } else {
+            queue.append(song)
+        }
+    }
+
+    func enqueueLast(_ song: Song) {
+        if let existing = queue.firstIndex(of: song) {
+            if let idx = currentIndex, existing <= idx { currentIndex = max(0, idx - 1) }
+            queue.remove(at: existing)
+        }
+        queue.append(song)
+    }
+
     @objc private func onPlaybackFinished(_ notification: Notification) {
         // Advance according to repeat mode and queue context
         if let _ = currentSong as? Song {
@@ -851,15 +913,16 @@ struct LineScrubber: View {
     }
 }
 
+// MARK: - Up Next View
 struct UpNextView: View {
     @EnvironmentObject var player: MusicPlayer
     var body: some View {
         NavigationView {
             List {
                 if let idx = player.currentIndex {
-                    let upcoming = Array(player.queue.dropFirst(idx + 1))
                     Section(header: Text("Up Next").foregroundColor(.white)) {
-                        ForEach(upcoming) { song in
+                        ForEach(Array(player.upcoming.enumerated()), id: \.element) { item in
+                            let song = item.element
                             HStack {
                                 LocalArtworkView(song: song, size: 44)
                                 VStack(alignment: .leading) {
@@ -871,7 +934,13 @@ struct UpNextView: View {
                             .onTapGesture { player.play(song: song) }
                             .listRowBackground(Color.clear)
                         }
-                        if upcoming.isEmpty {
+                        .onMove { indices, newOffset in
+                            player.moveUpcoming(from: indices, to: newOffset)
+                        }
+                        .onDelete { offsets in
+                            player.removeUpcoming(at: offsets)
+                        }
+                        if player.upcoming.isEmpty {
                             Text("No upcoming songs").foregroundColor(.white.opacity(0.6))
                                 .listRowBackground(Color.clear)
                         }
@@ -893,6 +962,7 @@ struct UpNextView: View {
                 }
             }
             .navigationTitle("Up Next")
+            .toolbar { EditButton() }
         }
     }
 }
@@ -1175,23 +1245,67 @@ struct SongRow: View {
     @EnvironmentObject var player: MusicPlayer
     @EnvironmentObject var libraryManager: LibraryManager
     let song: Song
+    @State private var showPlaylistSheet = false
 
     var body: some View {
         HStack {
-            LocalArtworkView(song: song, size: 44)
-                .id(song.objectID)
-            VStack(alignment: .leading) {
-                Text(song.title ?? "Unknown Title").foregroundColor(.white)
-                Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
+            Button(action: { player.play(song: song) }) {
+                HStack {
+                    LocalArtworkView(song: song, size: 44)
+                    VStack(alignment: .leading) {
+                        Text(song.title ?? "Unknown Title").foregroundColor(.white)
+                        Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
+                    }
+                }
             }
+            .buttonStyle(PlainButtonStyle())
             Spacer()
+            Menu {
+                Button(role: .destructive) { libraryManager.deleteSong(song) } label: {
+                    Label("Delete from Library", systemImage: "trash")
+                }
+                Divider()
+                Button(action: { showPlaylistSheet = true }) {
+                    Label("Add to Playlist", systemImage: "text.badge.plus")
+                }
+                Divider()
+                Button(action: { player.enqueueNext(song) }) {
+                    Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
+                }
+                Button(action: { player.enqueueLast(song) }) {
+                    Label("Play Last", systemImage: "text.line.last.and.arrowtriangle.forward")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .foregroundColor(.white.opacity(0.8))
+                    .font(.system(size: 16, weight: .semibold))
+                    .padding(.leading, 8)
+            }
+            .buttonStyle(PlainButtonStyle())
         }
-        .contentShape(Rectangle())
-        .onTapGesture { player.play(song: song) }
         .padding(.horizontal)
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
             Button(role: .destructive) { libraryManager.deleteSong(song) } label: {
                 Label("Delete", systemImage: "trash")
+            }
+        }
+        .sheet(isPresented: $showPlaylistSheet) {
+            NavigationView {
+                VStack(spacing: 16) {
+                    Text("Add to Playlist")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                    Text("Playlists coming soon.")
+                        .foregroundColor(.white.opacity(0.8))
+                    Button("Done") { showPlaylistSheet = false }
+                        .padding()
+                        .background(Color.white.opacity(0.2))
+                        .cornerRadius(8)
+                        .foregroundColor(.white)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.black.ignoresSafeArea())
+                .navigationTitle("")
             }
         }
     }
