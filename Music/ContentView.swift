@@ -58,6 +58,19 @@ struct QobuzTrack: Decodable {
     let url: String?
 }
 
+struct QobuzAlbum: Identifiable {
+    let id: String
+    let title: String
+    let artist: String
+    let image: String?
+}
+
+struct QobuzArtist: Identifiable {
+    let id: Int
+    let name: String
+    let image: String?
+}
+
 // MARK: - Circular Progress View
 struct CircularProgressView: View {
     let progress: Double   // 0.0 ... 1.0
@@ -458,6 +471,8 @@ final class LibraryManager: ObservableObject {
 final class QobuzAPI: ObservableObject {
     @Published var results: [QobuzTrack] = []
     @Published var errorMessage: String? = nil
+    @Published var albums: [QobuzAlbum] = []
+    @Published var artists: [QobuzArtist] = []
 
     func search(query: String) {
         guard let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
@@ -499,8 +514,11 @@ final class QobuzAPI: ObservableObject {
             }
             do {
                 let decoded = try JSONDecoder().decode(QQDLRoot.self, from: data)
-                let items = decoded.data?.tracks?.items ?? []
-                let mapped: [QobuzTrack] = items.map { item in
+                let trackItems = decoded.data?.tracks?.items ?? []
+                let albumItems = decoded.data?.albums?.items ?? []
+                let artistItems = decoded.data?.artists?.items ?? []
+
+                let mappedTracks: [QobuzTrack] = trackItems.map { item in
                     let artistName = item.performer?.name ?? ""
                     let albumTitle = item.album?.title
                     let imageUrl = item.album?.image?.large ?? item.album?.image?.small ?? item.album?.image?.thumbnail
@@ -513,9 +531,36 @@ final class QobuzAPI: ObservableObject {
                         url: nil
                     )
                 }
+
+                let mappedAlbums: [QobuzAlbum] = albumItems.map { item in
+                    let primaryArtist = item.artist?.name ?? item.artists?.first?.name ?? ""
+                    let imageUrl = item.image?.large ?? item.image?.small ?? item.image?.thumbnail
+                    return QobuzAlbum(
+                        id: item.id,
+                        title: item.title.trimmingCharacters(in: .whitespacesAndNewlines),
+                        artist: primaryArtist,
+                        image: imageUrl
+                    )
+                }
+
+                let mappedArtists: [QobuzArtist] = artistItems.map { item in
+                    let imageUrl = item.image?.large ?? item.image?.small ?? item.image?.thumbnail
+                    return QobuzArtist(
+                        id: item.id,
+                        name: item.name,
+                        image: imageUrl
+                    )
+                }
+
                 DispatchQueue.main.async {
-                    self.results = mapped
-                    self.errorMessage = mapped.isEmpty ? "No results found." : nil
+                    self.results = mappedTracks
+                    self.albums = mappedAlbums
+                    self.artists = mappedArtists
+                    if mappedTracks.isEmpty && mappedAlbums.isEmpty && mappedArtists.isEmpty {
+                        self.errorMessage = "No results found."
+                    } else {
+                        self.errorMessage = nil
+                    }
                 }
             } catch {
                 print("Final search decoding error:", error)
@@ -525,9 +570,14 @@ final class QobuzAPI: ObservableObject {
     }
 
     private struct QQDLRoot: Decodable { let success: Bool; let data: QQDLData? }
-    private struct QQDLData: Decodable { let tracks: QQDLTracks? }
+    private struct QQDLData: Decodable { let tracks: QQDLTracks?; let albums: QQDLAlbums?; let artists: QQDLArtists? }
     private struct QQDLTracks: Decodable { let items: [QQDLTrackItem]? }
     private struct QQDLTrackItem: Decodable { let id: Int; let title: String; let version: String?; let performer: QQDLPerformer?; let album: QQDLAlbum? }
+    private struct QQDLAlbums: Decodable { let items: [QQDLAlbumItem]? }
+    private struct QQDLAlbumItem: Decodable { let id: String; let title: String; let artist: QQDLArtistRef?; let artists: [QQDLArtistRef]?; let image: QQDLImage? }
+    private struct QQDLArtists: Decodable { let items: [QQDLArtistItem]? }
+    private struct QQDLArtistItem: Decodable { let id: Int; let name: String; let image: QQDLImage? }
+    private struct QQDLArtistRef: Decodable { let id: Int?; let name: String? }
     private struct QQDLPerformer: Decodable { let name: String }
     private struct QQDLAlbum: Decodable { let title: String?; let image: QQDLImage? }
     private struct QQDLImage: Decodable { let small: String?; let thumbnail: String?; let large: String? }
@@ -1568,6 +1618,7 @@ struct SearchView: View {
                         }
                     }
                     .onChange(of: query) { newValue in
+                        qobuzAPI.errorMessage = nil
                         if !isSearching {
                             withAnimation(.easeOut(duration: 0.35)) {
                                 showPicker = searchFocused || !newValue.isEmpty
@@ -1677,92 +1728,151 @@ struct SearchView: View {
                             }
                         }
                     } else {
-                        ForEach(qobuzAPI.results, id: \.id) { track in
-                            HStack {
-                                if let art = track.image, let url = URL(string: art) {
-                                    AsyncImage(url: url) { phase in
-                                        if let image = phase.image {
-                                            image.resizable()
-                                        } else if phase.error != nil {
-                                            Image(systemName: "exclamationmark.triangle")
-                                                .resizable()
-                                                .foregroundColor(.gray)
-                                        } else {
-                                            Image(systemName: "music.note")
-                                                .resizable()
-                                                .foregroundColor(.gray)
+                        switch contentType {
+                        case .track:
+                            ForEach(qobuzAPI.results, id: \.id) { track in
+                                HStack {
+                                    if let art = track.image, let url = URL(string: art) {
+                                        AsyncImage(url: url) { phase in
+                                            if let image = phase.image {
+                                                image.resizable()
+                                            } else if phase.error != nil {
+                                                Image(systemName: "exclamationmark.triangle")
+                                                    .resizable()
+                                                    .foregroundColor(.gray)
+                                            } else {
+                                                Image(systemName: "music.note")
+                                                    .resizable()
+                                                    .foregroundColor(.gray)
+                                            }
+                                        }
+                                        .frame(width: 44, height: 44)
+                                        .cornerRadius(4)
+                                    }
+
+                                    VStack(alignment: .leading) {
+                                        Text(track.title).foregroundColor(.white)
+                                        Text(track.artist).font(.caption).foregroundColor(.white.opacity(0.8))
+                                        if let album = track.album {
+                                            Text(album).font(.caption2).foregroundColor(.white.opacity(0.6))
                                         }
                                     }
-                                    .frame(width: 44, height: 44)
-                                    .cornerRadius(4)
-                                }
+                                    Spacer()
 
-                                VStack(alignment: .leading) {
-                                    Text(track.title).foregroundColor(.white)
-                                    Text(track.artist).font(.caption).foregroundColor(.white.opacity(0.8))
-                                    if let album = track.album {
-                                        Text(album).font(.caption2).foregroundColor(.white.opacity(0.6))
+                                    let songKey = "\(track.title)-\(track.artist)"
+                                    let isInLibrary = libraryManager.isSongInLibrary(title: track.title, artist: track.artist)
+                                    let wasJustAdded = addedSongs.contains(songKey)
+                                    let isAdding = addingSongs.contains(songKey)
+
+                                    Button(action: {
+                                        if !isInLibrary && !isAdding {
+                                            addingSongs.insert(songKey)
+
+                                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                                let success = libraryManager.addSong(from: track)
+                                                addingSongs.remove(songKey)
+
+                                                if success {
+                                                    addedSongs.insert(songKey)
+                                                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                                                        addedSongs.remove(songKey)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }) {
+                                        Image(systemName: isInLibrary || wasJustAdded ? "checkmark" : "plus")
+                                            .foregroundColor(isInLibrary || wasJustAdded ? .red : .white)
+                                            .font(.system(size: 18, weight: .bold))
                                     }
+                                    .disabled(isInLibrary || isAdding)
+                                    .buttonStyle(PlainButtonStyle())
+                                    .scaleEffect(isAdding ? 1.2 : 1.0)
+                                    .animation(.easeInOut(duration: 0.2), value: isAdding)
                                 }
-                                Spacer()
-                                
-                                let songKey = "\(track.title)-\(track.artist)"
-                                let isInLibrary = libraryManager.isSongInLibrary(title: track.title, artist: track.artist)
-                                let wasJustAdded = addedSongs.contains(songKey)
-                                let isAdding = addingSongs.contains(songKey)
-                                
-                                // Add to library button (which now downloads automatically)
-                                Button(action: {
-                                    if !isInLibrary && !isAdding {
-                                        addingSongs.insert(songKey)
-                                        
-                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                            let success = libraryManager.addSong(from: track)
-                                            addingSongs.remove(songKey)
-                                            
-                                            if success {
-                                                addedSongs.insert(songKey)
-                                                // Remove from added songs after 2 seconds
-                                                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                                                    addedSongs.remove(songKey)
+                                .listRowBackground(Color.clear)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    if let localSong = libraryManager.findSongMatching(track: track),
+                                       let _ = DownloadManager.shared.getLocalFileURL(for: localSong) {
+                                        player.play(song: localSong)
+                                    } else {
+                                        let temp = TempSong(from: track)
+                                        player.play(tempSong: temp)
+                                        DownloadManager.shared.resolveStreamURLForQobuz(trackId: track.id) { result in
+                                            DispatchQueue.main.async {
+                                                switch result {
+                                                case .success(let url):
+                                                    let updated = TempSong(id: temp.id, title: temp.title, artist: temp.artist, artwork: temp.artwork, album: temp.album, url: url.absoluteString)
+                                                    AudioPlayer.shared.play(tempSong: updated)
+                                                case .failure(let error):
+                                                    print("Failed to resolve stream URL: \(error)")
                                                 }
                                             }
                                         }
                                     }
-                                }) {
-                                    Image(systemName: isInLibrary || wasJustAdded ? "checkmark" : "plus")
-                                        .foregroundColor(isInLibrary || wasJustAdded ? .red : .white)
-                                        .font(.system(size: 18, weight: .bold))
                                 }
-                                .disabled(isInLibrary || isAdding)
-                                .buttonStyle(PlainButtonStyle())
-                                .scaleEffect(isAdding ? 1.2 : 1.0)
-                                .animation(.easeInOut(duration: 0.2), value: isAdding)
                             }
-                            .listRowBackground(Color.clear)
-                            .contentShape(Rectangle()) // Make the row tappable
-                            .onTapGesture {
-                                // Prefer local if exists; else stream immediately
-                                if let localSong = libraryManager.findSongMatching(track: track),
-                                   let _ = DownloadManager.shared.getLocalFileURL(for: localSong) {
-                                    player.play(song: localSong)
-                                } else {
-                                    // Show UI immediately with temp metadata
-                                    let temp = TempSong(from: track)
-                                    player.play(tempSong: temp) // sets UI state
-                                    // Resolve full stream URL via existing flow and play
-                                    DownloadManager.shared.resolveStreamURLForQobuz(trackId: track.id) { result in
-                                        DispatchQueue.main.async {
-                                            switch result {
-                                            case .success(let url):
-                                                let updated = TempSong(id: temp.id, title: temp.title, artist: temp.artist, artwork: temp.artwork, album: temp.album, url: url.absoluteString)
-                                                AudioPlayer.shared.play(tempSong: updated)
-                                            case .failure(let error):
-                                                print("Failed to resolve stream URL: \(error)")
+                        case .album:
+                            ForEach(qobuzAPI.albums, id: \.id) { album in
+                                HStack {
+                                    if let art = album.image, let url = URL(string: art) {
+                                        AsyncImage(url: url) { phase in
+                                            if let image = phase.image {
+                                                image.resizable()
+                                            } else if phase.error != nil {
+                                                Image(systemName: "exclamationmark.triangle")
+                                                    .resizable()
+                                                    .foregroundColor(.gray)
+                                            } else {
+                                                Image(systemName: "opticaldisc")
+                                                    .resizable()
+                                                    .foregroundColor(.gray)
                                             }
                                         }
+                                        .frame(width: 44, height: 44)
+                                        .cornerRadius(4)
                                     }
+                                    VStack(alignment: .leading) {
+                                        Text(album.title).foregroundColor(.white)
+                                        Text(album.artist).font(.caption).foregroundColor(.white.opacity(0.8))
+                                    }
+                                    Spacer()
                                 }
+                                .listRowBackground(Color.clear)
+                            }
+                        case .artist:
+                            ForEach(qobuzAPI.artists, id: \.id) { artist in
+                                HStack {
+                                    if let art = artist.image, let url = URL(string: art) {
+                                        AsyncImage(url: url) { phase in
+                                            if let image = phase.image {
+                                                image.resizable()
+                                            } else if phase.error != nil {
+                                                Image(systemName: "exclamationmark.triangle")
+                                                    .resizable()
+                                                    .foregroundColor(.gray)
+                                            } else {
+                                                Image(systemName: "person.crop.square")
+                                                    .resizable()
+                                                    .foregroundColor(.gray)
+                                            }
+                                        }
+                                        .frame(width: 44, height: 44)
+                                        .cornerRadius(4)
+                                    } else {
+                                        Image(systemName: "person.crop.square")
+                                            .resizable()
+                                            .foregroundColor(.gray)
+                                            .frame(width: 44, height: 44)
+                                            .cornerRadius(4)
+                                    }
+                                    VStack(alignment: .leading) {
+                                        Text(artist.name).foregroundColor(.white)
+                                    }
+                                    Spacer()
+                                }
+                                .listRowBackground(Color.clear)
                             }
                         }
                     }
