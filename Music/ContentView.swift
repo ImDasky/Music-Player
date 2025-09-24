@@ -1391,13 +1391,18 @@ struct SongRow: View {
             } label: {
                 Image(systemName: "ellipsis")
                     .foregroundColor(.white.opacity(0.8))
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(.system(size: 18, weight: .semibold))
                     .padding(.leading, 8)
             }
             .buttonStyle(PlainButtonStyle())
         }
         .contentShape(Rectangle())
-        .onTapGesture { player.play(song: song) }
+        .overlay(alignment: .leading) {
+            Color.clear
+                .contentShape(Rectangle())
+                .padding(.trailing, 56) // Exclude trailing area where the menu sits
+                .onTapGesture { player.play(song: song) }
+        }
         .padding(.horizontal)
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
             Button(role: .destructive) { libraryManager.deleteSong(song) } label: {
