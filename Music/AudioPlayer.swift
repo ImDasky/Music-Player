@@ -233,25 +233,21 @@ class AudioPlayer: NSObject, ObservableObject {
                 return
             }
             
-            // Attach player node to engine
-            engine.attach(playerNode)
-            
-            // Connect to main mixer
-            let mainMixer = engine.mainMixerNode
-            engine.connect(playerNode, to: mainMixer, format: nil)
-            
-            // Create audio file
+            // Create audio file first to obtain processing format
             audioFile = try AVAudioFile(forReading: url)
-            
             guard let file = audioFile else {
                 print("Failed to create audio file")
                 playWithAVPlayer(url: url)
                 return
             }
-            
-            // Configure for high quality
             let format = file.processingFormat
-            print("Audio file format - Sample Rate: \(format.sampleRate)Hz, Channels: \(format.channelCount), Bit Depth: \(format.commonFormat.rawValue)")
+            
+            // Attach player node to engine
+            engine.attach(playerNode)
+            
+            // Connect using explicit file format to avoid format mismatch
+            let mainMixer = engine.mainMixerNode
+            engine.connect(playerNode, to: mainMixer, format: format)
             
             // Reset base offset
             hqStartTimeOffset = 0
@@ -270,10 +266,26 @@ class AudioPlayer: NSObject, ObservableObject {
                 }
             }
             
-            // Start the engine
-            try engine.start()
+            // Prepare and start the engine
+            engine.prepare()
+            do {
+                try engine.start()
+            } catch {
+                print("Audio engine failed to start: \(error)")
+                // Fallback to standard AVPlayer if engine can't start
+                engine.stop()
+                playWithAVPlayer(url: url)
+                return
+            }
             
-            // Start playback
+            // Start playback only if engine is running
+            guard engine.isRunning else {
+                print("Audio engine not running; falling back to AVPlayer")
+                engine.stop()
+                playWithAVPlayer(url: url)
+                return
+            }
+            
             playerNode.play()
             isPlaying = true
             
@@ -361,7 +373,11 @@ class AudioPlayer: NSObject, ObservableObject {
     }
     
     func resume() {
-        if let playerNode = audioPlayerNode {
+        if let playerNode = audioPlayerNode, let engine = audioEngine {
+            if !engine.isRunning {
+                engine.prepare()
+                do { try engine.start() } catch { print("Engine failed to restart on resume: \(error)") }
+            }
             playerNode.play()
             // Restart timer for high-quality playback to update currentTime
             startHighQualityTimeObserver()
@@ -384,6 +400,7 @@ class AudioPlayer: NSObject, ObservableObject {
 
     func stop() {
         // Stop high-quality engine
+        audioPlayerNode?.stop()
         audioEngine?.stop()
         audioEngine = nil
         audioPlayerNode = nil
