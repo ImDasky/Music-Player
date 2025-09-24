@@ -1367,16 +1367,11 @@ struct SongRow: View {
  
     var body: some View {
         HStack {
-            Button(action: { player.play(song: song) }) {
-                HStack {
-                    LocalArtworkView(song: song, size: 44)
-                    VStack(alignment: .leading) {
-                        Text(song.title ?? "Unknown Title").foregroundColor(.white)
-                        Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
-                    }
-                }
+            LocalArtworkView(song: song, size: 44)
+            VStack(alignment: .leading) {
+                Text(song.title ?? "Unknown Title").foregroundColor(.white)
+                Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
             }
-            .buttonStyle(PlainButtonStyle())
             Spacer()
             Menu {
                 Button(role: .destructive) { libraryManager.deleteSong(song) } label: {
@@ -1401,6 +1396,8 @@ struct SongRow: View {
             }
             .buttonStyle(PlainButtonStyle())
         }
+        .contentShape(Rectangle())
+        .onTapGesture { player.play(song: song) }
         .padding(.horizontal)
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
             Button(role: .destructive) { libraryManager.deleteSong(song) } label: {
