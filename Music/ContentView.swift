@@ -457,6 +457,7 @@ final class LibraryManager: ObservableObject {
 // MARK: - Qobuz API Client
 final class QobuzAPI: ObservableObject {
     @Published var results: [QobuzTrack] = []
+    @Published var errorMessage: String? = nil
 
     func search(query: String) {
         guard let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
@@ -480,6 +481,56 @@ final class QobuzAPI: ObservableObject {
             }
         }.resume()
     }
+
+    func finalSearch(query: String) {
+        guard let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "https://us.qqdl.site/api/get-music?q=\(encoded)&offset=0") else { return }
+        errorMessage = nil
+
+        URLSession.shared.dataTask(with: url) { data, _, error in
+            if let error = error {
+                print("Final search request error:", error)
+                DispatchQueue.main.async { self.errorMessage = "Search failed. Please try again." }
+                return
+            }
+            guard let data = data else {
+                DispatchQueue.main.async { self.errorMessage = "No data received." }
+                return
+            }
+            do {
+                let decoded = try JSONDecoder().decode(QQDLRoot.self, from: data)
+                let items = decoded.data?.tracks?.items ?? []
+                let mapped: [QobuzTrack] = items.map { item in
+                    let artistName = item.performer?.name ?? ""
+                    let albumTitle = item.album?.title
+                    let imageUrl = item.album?.image?.large ?? item.album?.image?.small ?? item.album?.image?.thumbnail
+                    return QobuzTrack(
+                        id: item.id,
+                        title: item.title.trimmingCharacters(in: .whitespacesAndNewlines),
+                        artist: artistName,
+                        album: albumTitle,
+                        image: imageUrl,
+                        url: nil
+                    )
+                }
+                DispatchQueue.main.async {
+                    self.results = mapped
+                    self.errorMessage = mapped.isEmpty ? "No results found." : nil
+                }
+            } catch {
+                print("Final search decoding error:", error)
+                DispatchQueue.main.async { self.errorMessage = "Unexpected response format." }
+            }
+        }.resume()
+    }
+
+    private struct QQDLRoot: Decodable { let success: Bool; let data: QQDLData? }
+    private struct QQDLData: Decodable { let tracks: QQDLTracks? }
+    private struct QQDLTracks: Decodable { let items: [QQDLTrackItem]? }
+    private struct QQDLTrackItem: Decodable { let id: Int; let title: String; let version: String?; let performer: QQDLPerformer?; let album: QQDLAlbum? }
+    private struct QQDLPerformer: Decodable { let name: String }
+    private struct QQDLAlbum: Decodable { let title: String?; let image: QQDLImage? }
+    private struct QQDLImage: Decodable { let small: String?; let thumbnail: String?; let large: String? }
 }
 
 // MARK: - ContentView
@@ -1511,6 +1562,10 @@ struct SearchView: View {
                             showPicker = false
                         }
                         searchFocused = false
+                        if mode == .newMusic {
+                            let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !trimmed.isEmpty { qobuzAPI.finalSearch(query: trimmed) }
+                        }
                     }
                     .onChange(of: query) { newValue in
                         if !isSearching {
@@ -1536,6 +1591,12 @@ struct SearchView: View {
                             }
                         }
                     }
+                if let error = qobuzAPI.errorMessage {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                        .padding(.horizontal)
+                }
                 // Segmented picker or bubbles occupy same space
                 ZStack(alignment: .leading) {
                     // Animate the entire ZStack content changes
