@@ -1843,34 +1843,36 @@ struct SearchView: View {
                             }
                         case .artist:
                             ForEach(qobuzAPI.artists, id: \.id) { artist in
-                                HStack {
-                                    if let art = artist.image, let url = URL(string: art) {
-                                        AsyncImage(url: url) { phase in
-                                            if let image = phase.image {
-                                                image.resizable()
-                                            } else if phase.error != nil {
-                                                Image(systemName: "exclamationmark.triangle")
-                                                    .resizable()
-                                                    .foregroundColor(.gray)
-                                            } else {
-                                                Image(systemName: "person.crop.square")
-                                                    .resizable()
-                                                    .foregroundColor(.gray)
+                                NavigationLink(destination: ArtistDetailView(artist: artist)) {
+                                    HStack {
+                                        if let art = artist.image, let url = URL(string: art) {
+                                            AsyncImage(url: url) { phase in
+                                                if let image = phase.image {
+                                                    image.resizable()
+                                                } else if phase.error != nil {
+                                                    Image(systemName: "exclamationmark.triangle")
+                                                        .resizable()
+                                                        .foregroundColor(.gray)
+                                                } else {
+                                                    Image(systemName: "person.crop.square")
+                                                        .resizable()
+                                                        .foregroundColor(.gray)
+                                                }
                                             }
-                                        }
-                                        .frame(width: 44, height: 44)
-                                        .cornerRadius(4)
-                                    } else {
-                                        Image(systemName: "person.crop.square")
-                                            .resizable()
-                                            .foregroundColor(.gray)
                                             .frame(width: 44, height: 44)
                                             .cornerRadius(4)
+                                        } else {
+                                            Image(systemName: "person.crop.square")
+                                                .resizable()
+                                                .foregroundColor(.gray)
+                                                .frame(width: 44, height: 44)
+                                                .cornerRadius(4)
+                                        }
+                                        VStack(alignment: .leading) {
+                                            Text(artist.name).foregroundColor(.white)
+                                        }
+                                        Spacer()
                                     }
-                                    VStack(alignment: .leading) {
-                                        Text(artist.name).foregroundColor(.white)
-                                    }
-                                    Spacer()
                                 }
                                 .listRowBackground(Color.clear)
                             }
@@ -1883,6 +1885,76 @@ struct SearchView: View {
                 filteredLibrary = libraryManager.searchSongs(query: query)
             }
         }
+    }
+}
+
+struct ArtistDetailView: View {
+    let artist: QobuzArtist
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .center, spacing: 16) {
+                    if let art = artist.image, let url = URL(string: art) {
+                        AsyncImage(url: url) { phase in
+                            if let image = phase.image {
+                                image.resizable()
+                            } else if phase.error != nil {
+                                Image(systemName: "exclamationmark.triangle")
+                                    .resizable()
+                                    .foregroundColor(.gray)
+                            } else {
+                                Image(systemName: "person.crop.square")
+                                    .resizable()
+                                    .foregroundColor(.gray)
+                            }
+                        }
+                        .frame(width: 96, height: 96)
+                        .cornerRadius(8)
+                    } else {
+                        Image(systemName: "person.crop.square")
+                            .resizable()
+                            .foregroundColor(.gray)
+                            .frame(width: 96, height: 96)
+                            .cornerRadius(8)
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(artist.name)
+                            .font(.title2).bold()
+                            .foregroundColor(.white)
+                        Text("Artist")
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.7))
+                    }
+                    Spacer()
+                }
+
+                Divider().background(Color.white.opacity(0.1))
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Popular")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                    ForEach(0..<5) { idx in
+                        HStack {
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color.white.opacity(0.12))
+                                .frame(width: 44, height: 44)
+                                .overlay(Image(systemName: "music.note").foregroundColor(.white))
+                            VStack(alignment: .leading) {
+                                Text("Sample Track \(idx + 1)").foregroundColor(.white)
+                                Text(artist.name).font(.caption).foregroundColor(.white.opacity(0.8))
+                            }
+                            Spacer()
+                        }
+                    }
+                }
+            }
+            .padding()
+        }
+        .background(Color.black.ignoresSafeArea())
+        .navigationTitle(artist.name)
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
