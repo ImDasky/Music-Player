@@ -71,7 +71,148 @@ struct QobuzArtist: Identifiable {
     let image: String?
 }
 
-// MARK: - Circular Progress View
+
+// MARK: - New API Models for Artist/Album Details
+struct ArtistResponse: Codable { let success: Bool; let data: ArtistData? }
+struct ArtistData: Codable { let artist: Artist; let releases: [ReleaseBucket]? }
+
+struct Artist: Codable {
+    let id: Int
+    let name: LocalizedName
+    let artistCategory: String?
+    let biography: Biography?
+    let images: ArtistImages?
+    let releases: [ReleaseBucket]?
+    enum CodingKeys: String, CodingKey { case id, name, biography, images, releases; case artistCategory = "artist_category" }
+}
+
+struct LocalizedName: Codable {
+    let display: String
+    init(display: String) { self.display = display }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if let s = try? c.decode(String.self) { self.display = s; return }
+        struct Obj: Codable { let display: String }
+        self.display = try c.decode(Obj.self).display
+    }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        try c.encode(["display": display])
+    }
+}
+
+struct Biography: Codable { let content: String? }
+struct ArtistImages: Codable { let portrait: ImageDescriptor? }
+struct ImageDescriptor: Codable { let hash: String?; let format: String? }
+
+struct ReleaseBucket: Codable {
+    let type: String
+    let hasMore: Bool?
+    let items: [ReleaseItem]?
+    enum CodingKeys: String, CodingKey { case type, items; case hasMore = "has_more" }
+}
+
+struct ReleaseItem: Codable, Identifiable {
+    let id: String
+    let title: String
+    let version: String?
+    let tracksCount: Int?
+    let image: AlbumImages?
+    let label: LabelRef?
+    let dates: ReleaseDates?
+    let parentalWarning: Bool?
+    let releaseType: String?
+    enum CodingKeys: String, CodingKey {
+        case id, title, version, image, label, dates
+        case tracksCount = "tracks_count"
+        case parentalWarning = "parental_warning"
+        case releaseType = "release_type"
+    }
+}
+
+struct AlbumImages: Codable { let small: String?; let thumbnail: String?; let large: String? }
+struct LabelRef: Codable { let id: Int?; let name: String? }
+struct ReleaseDates: Codable { let download: String?; let original: String?; let stream: String? }
+
+struct DisplayAlbum: Identifiable, Hashable {
+    let id: String
+    let title: String
+    let imageURL: URL?
+    let label: String
+    let releaseDate: Date?
+    let tracksCount: Int?
+    let isExplicit: Bool
+}
+
+struct AlbumResponse: Codable { let success: Bool; let data: AlbumData? }
+struct AlbumData: Codable {
+    let id: String?
+    let artist: SimpleArtist?
+    let releaseDateDownload: String?
+    let trackIDs: [Int]?
+    let tracks: TracksPage
+    enum CodingKeys: String, CodingKey {
+        case id, artist, tracks
+        case trackIDs = "track_ids"
+        case releaseDateDownload = "release_date_download"
+    }
+}
+
+struct SimpleArtist: Codable { let id: Int?; let name: String? }
+struct TracksPage: Codable { let offset: Int?; let items: [TrackItem]? }
+
+struct TrackItem: Codable {
+    let id: Int?
+    let isrc: String?
+    let title: String?
+    let duration: Int?
+    let trackNumber: Int?
+    let parentalWarning: Bool?
+    enum CodingKeys: String, CodingKey {
+        case id, isrc, title, duration
+        case trackNumber = "track_number"
+        case parentalWarning = "parental_warning"
+    }
+}
+
+struct TrackRow: Identifiable, Hashable {
+    let id: String
+    let trackNumber: Int?
+    let title: String
+    let duration: Int?
+    let isrc: String?
+    let explicit: Bool
+    let qobuzTrackId: Int?
+
+    var durationString: String {
+        let secs = duration ?? 0
+        let m = secs / 60, s = secs % 60
+        return "(m):" + String(format: "%02d", s)
+    }
+}
+
+enum APIError: LocalizedError {
+    case invalidURL, badStatus(Int), decodingFailed, emptyData, unknown
+    var errorDescription: String? {
+        switch self {
+        case .invalidURL: return "The API URL is invalid."
+        case .badStatus(let code): return "Server returned status (code)."
+        case .decodingFailed: return "Failed to decode server response."
+        case .emptyData: return "No data found."
+        case .unknown: return "Something went wrong."
+        }
+    }
+}
+
+extension DateFormatter {
+    static let yyyyMMdd: DateFormatter = {
+        let df = DateFormatter()
+        df.calendar = Calendar(identifier: .gregorian)
+        df.locale = Locale(identifier: "en_US_POSIX")
+        df.dateFormat = "yyyy-MM-dd"
+        return df
+    }()
+}// MARK: - Circular Progress View
 struct CircularProgressView: View {
     let progress: Double   // 0.0 ... 1.0
     let size: CGFloat
@@ -581,7 +722,51 @@ final class QobuzAPI: ObservableObject {
     private struct QQDLPerformer: Decodable { let name: String }
     private struct QQDLAlbum: Decodable { let title: String?; let image: QQDLImage? }
     private struct QQDLImage: Decodable { let small: String?; let thumbnail: String?; let large: String? }
-}
+
+    // MARK: - New Artist/Album API Methods
+    func getArtist(artistID: String) async throws -> ArtistData {
+        guard var comps = URLComponents(string: "https://us.qqdl.site/api/get-artist") else { throw APIError.invalidURL }
+        comps.queryItems = [URLQueryItem(name: "artist_id", value: artistID)]
+        guard let url = comps.url else { throw APIError.invalidURL }
+
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 20
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { throw APIError.unknown }
+        guard (200..<300).contains(http.statusCode) else { throw APIError.badStatus(http.statusCode) }
+
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .useDefaultKeys
+        do {
+            let parsed = try decoder.decode(ArtistResponse.self, from: data)
+            guard parsed.success, let artistData = parsed.data else { throw APIError.emptyData }
+            return artistData
+        } catch {
+            throw APIError.decodingFailed
+        }
+    }
+
+    func getAlbum(albumID: String) async throws -> AlbumData {
+        guard var comps = URLComponents(string: "https://us.qqdl.site/api/get-album") else { throw APIError.invalidURL }
+        comps.queryItems = [URLQueryItem(name: "album_id", value: albumID)]
+        guard let url = comps.url else { throw APIError.invalidURL }
+
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 20
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { throw APIError.unknown }
+        guard (200..<300).contains(http.statusCode) else { throw APIError.badStatus(http.statusCode) }
+
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .useDefaultKeys
+        do {
+            let parsed = try decoder.decode(AlbumResponse.self, from: data)
+            guard parsed.success, let data = parsed.data else { throw APIError.emptyData }
+            return data
+        } catch {
+            throw APIError.decodingFailed
+        }
+    }}
 
 // MARK: - ContentView
 struct ContentView: View {
@@ -1892,10 +2077,16 @@ struct SearchView: View {
 
 struct ArtistDetailView: View {
     let artist: QobuzArtist
+    @StateObject private var qobuzAPI = QobuzAPI()
+    @State private var artistData: ArtistData?
+    @State private var albums: [DisplayAlbum] = []
+    @State private var isLoading = false
+    @State private var errorMessage: String?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                // Artist Header
                 HStack(alignment: .center, spacing: 16) {
                     if let art = artist.image, let url = URL(string: art) {
                         AsyncImage(url: url) { phase in
@@ -1931,25 +2122,62 @@ struct ArtistDetailView: View {
                     Spacer()
                 }
 
-                Divider().background(Color.white.opacity(0.1))
+                // Bio Section
+                if let bio = artistData?.artist.biography?.content, !bio.isEmpty {
+                    Divider().background(Color.white.opacity(0.1))
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("About")
+                            .font(.headline)
+                            .foregroundColor(.white)
+                        Text(bioStripped(bio))
+                            .font(.callout)
+                            .foregroundColor(.white.opacity(0.8))
+                            .lineLimit(6)
+                            .overlay(
+                                LinearGradient(
+                                    colors: [.clear, Color.black],
+                                    startPoint: .center, endPoint: .bottom
+                                )
+                                .frame(height: 30)
+                                .allowsHitTesting(false),
+                                alignment: .bottom
+                            )
+                    }
+                }
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Popular")
-                        .font(.headline)
-                        .foregroundColor(.white)
-                    ForEach(0..<5) { idx in
-                        HStack {
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(Color.white.opacity(0.12))
-                                .frame(width: 44, height: 44)
-                                .overlay(Image(systemName: "music.note").foregroundColor(.white))
-                            VStack(alignment: .leading) {
-                                Text("Sample Track \(idx + 1)").foregroundColor(.white)
-                                Text(artist.name).font(.caption).foregroundColor(.white.opacity(0.8))
+                // Albums Section
+                if !albums.isEmpty {
+                    Divider().background(Color.white.opacity(0.1))
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Albums")
+                            .font(.headline)
+                            .foregroundColor(.white)
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 16)], spacing: 16) {
+                            ForEach(albums) { album in
+                                NavigationLink(destination: AlbumDetailView(albumID: album.id, albumTitle: album.title, albumArt: album.imageURL)) {
+                                    AlbumCard(album: album)
+                                }
+                                .buttonStyle(.plain)
                             }
-                            Spacer()
                         }
                     }
+                }
+
+                // Loading/Error States
+                if isLoading {
+                    HStack { Spacer(); ProgressView().padding(.vertical, 12); Spacer() }
+                } else if let error = errorMessage {
+                    VStack(spacing: 12) {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
+                        Text(error).multilineTextAlignment(.center)
+                        Button { Task { await fetchArtistData() } } label: {
+                            Label("Try Again", systemImage: "arrow.clockwise")
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 16))
                 }
             }
             .padding()
@@ -1957,9 +2185,293 @@ struct ArtistDetailView: View {
         .background(Color.black.ignoresSafeArea())
         .navigationTitle(artist.name)
         .navigationBarTitleDisplayMode(.inline)
+        .task { await fetchArtistData() }
+        .refreshable { await fetchArtistData() }
+    }
+
+    private func bioStripped(_ raw: String) -> String {
+        raw.replacingOccurrences(of: "<br />", with: "\n")
+            .replacingOccurrences(of: "<br/>", with: "\n")
+            .replacingOccurrences(of: "&copy", with: "©")
+            .replacingOccurrences(of: "  ", with: " ")
+    }
+
+    private func fetchArtistData() async {
+        errorMessage = nil
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            let data = try await qobuzAPI.getArtist(artistID: String(artist.id))
+            artistData = data
+            
+            let buckets = data.artist.releases ?? []
+            let albumBucket = buckets.first { $0.type.lowercased().trimmingCharacters(in: .whitespaces) == "album" }
+            let items = albumBucket?.items ?? []
+
+            let mapped = items.map { mapAlbum($0) }
+            albums = mapped.sorted { ($0.releaseDate ?? .distantPast) > ($1.releaseDate ?? .distantPast) }
+
+            if albums.isEmpty { errorMessage = "No albums found for this artist." }
+        } catch {
+            errorMessage = (error as? APIError)?.localizedDescription ?? error.localizedDescription
+        }
+    }
+
+    private func mapAlbum(_ item: ReleaseItem) -> DisplayAlbum {
+        let imgURL = URL(string: item.image?.large ?? item.image?.small ?? item.image?.thumbnail ?? "")
+        let label = item.label?.name ?? ""
+        let date = item.dates?.original.flatMap { DateFormatter.yyyyMMdd.date(from: $0) }
+        return DisplayAlbum(
+            id: item.id,
+            title: item.title + (item.version.map { " (\($0))" } ?? ""),
+            imageURL: imgURL,
+            label: label,
+            releaseDate: date,
+            tracksCount: item.tracksCount,
+            isExplicit: item.parentalWarning ?? false
+        )
+    }
+}
+struct AlbumCard: View {
+    let album: DisplayAlbum
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14)
+                    .fill(Color.white.opacity(0.1))
+                if let url = album.imageURL {
+                    AsyncImage(url: url) { phase in
+                        switch phase {
+                        case .empty: ProgressView()
+                        case .success(let img): img.resizable().scaledToFill()
+                        case .failure:
+                            Image(systemName: "opticaldisc").font(.largeTitle).foregroundColor(.white.opacity(0.6))
+                        @unknown default: Color.clear
+                        }
+                    }
+                } else {
+                    Image(systemName: "opticaldisc").font(.largeTitle).foregroundColor(.white.opacity(0.6))
+                }
+            }
+            .frame(height: 180)
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(album.title).font(.headline).lineLimit(2).foregroundColor(.white)
+                HStack(spacing: 8) {
+                    if album.isExplicit {
+                        Text("Explicit")
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 6).padding(.vertical, 3)
+                            .background(Color.red.opacity(0.15), in: Capsule())
+                            .foregroundColor(.red)
+                    }
+                    if let tracks = album.tracksCount {
+                        Label("\(tracks)", systemImage: "music.note.list")
+                            .font(.caption).foregroundColor(.white.opacity(0.7))
+                    }
+                }
+                if let d = album.releaseDate {
+                    Text(d.formatted(.dateTime.year().month().day()))
+                        .font(.caption).foregroundColor(.white.opacity(0.7))
+                }
+                if !album.label.isEmpty {
+                    Text(album.label).font(.caption).foregroundColor(.white.opacity(0.7)).lineLimit(1)
+                }
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color.white.opacity(0.05))
+                .shadow(radius: 2, x: 0, y: 1)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .strokeBorder(Color.white.opacity(0.1))
+        )
     }
 }
 
+struct AlbumDetailView: View {
+    let albumID: String
+    let albumTitle: String
+    let albumArt: URL?
+    @StateObject private var qobuzAPI = QobuzAPI()
+    @EnvironmentObject var libraryManager: LibraryManager
+    @State private var tracks: [TrackRow] = []
+    @State private var isLoading = false
+    @State private var errorMessage: String?
+    @State private var addedSongs: Set<String> = []
+    @State private var addingSongs: Set<String> = []
+
+    var body: some View {
+        List {
+            // Album Header
+            if let art = albumArt {
+                Section {
+                    HStack(alignment: .top, spacing: 16) {
+                        AsyncImage(url: art) { phase in
+                            switch phase {
+                            case .empty: ProgressView()
+                            case .success(let img): img.resizable().scaledToFill()
+                            case .failure: Image(systemName: "opticaldisc").font(.largeTitle).foregroundColor(.white.opacity(0.6))
+                            @unknown default: Color.clear
+                            }
+                        }
+                        .frame(width: 120, height: 120)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(albumTitle).font(.headline).lineLimit(3).foregroundColor(.white)
+                            if !tracks.isEmpty {
+                                Text("\(tracks.count) tracks • \(totalDuration())")
+                                    .font(.caption)
+                                    .foregroundColor(.white.opacity(0.7))
+                            }
+                        }
+                    }
+                    .listRowBackground(Color.clear)
+                }
+            }
+
+            // Loading/Error States
+            if isLoading {
+                Section { HStack { Spacer(); ProgressView(); Spacer() } }
+            } else if let error = errorMessage {
+                Section {
+                    VStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
+                        Text(error).multilineTextAlignment(.center)
+                        Button { Task { await fetch() } } label: {
+                            Label("Try Again", systemImage: "arrow.clockwise")
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+            } else {
+                // Tracks Section
+                Section(header: Text("Tracks").foregroundColor(.white)) {
+                    ForEach(tracks) { track in
+                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+                            Text("\(track.trackNumber ?? 0)")
+                                .font(.subheadline.monospacedDigit())
+                                .foregroundColor(.white.opacity(0.7))
+                                .frame(width: 24, alignment: .trailing)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 6) {
+                                    Text(track.title).font(.body).lineLimit(2).foregroundColor(.white)
+                                    if track.explicit {
+                                        Text("E")
+                                            .font(.caption2.weight(.bold))
+                                            .padding(.horizontal, 4).padding(.vertical, 1)
+                                            .background(Color.red.opacity(0.15), in: RoundedRectangle(cornerRadius: 4))
+                                            .foregroundColor(.red)
+                                    }
+                                }
+                                Text(track.durationString).font(.caption2).foregroundColor(.white.opacity(0.7))
+                            }
+                            Spacer()
+                            
+                            // Add to library button
+                            let songKey = "\(track.title)-\(albumTitle)"
+                            let isInLibrary = libraryManager.isSongInLibrary(title: track.title, artist: albumTitle)
+                            let wasJustAdded = addedSongs.contains(songKey)
+                            let isAdding = addingSongs.contains(songKey)
+                            
+                            Button(action: {
+                                if !isInLibrary && !isAdding {
+                                    addingSongs.insert(songKey)
+                                    
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                        let qobuzTrack = QobuzTrack(
+                                            id: track.qobuzTrackId ?? 0,
+                                            title: track.title,
+                                            artist: albumTitle,
+                                            album: albumTitle,
+                                            image: albumArt?.absoluteString,
+                                            url: nil
+                                        )
+                                        let success = libraryManager.addSong(from: qobuzTrack)
+                                        addingSongs.remove(songKey)
+                                        
+                                        if success {
+                                            addedSongs.insert(songKey)
+                                            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                                                addedSongs.remove(songKey)
+                                            }
+                                        }
+                                    }
+                                }
+                            }) {
+                                Image(systemName: isInLibrary || wasJustAdded ? "checkmark" : "plus")
+                                    .foregroundColor(isInLibrary || wasJustAdded ? .red : .white)
+                                    .font(.system(size: 18, weight: .bold))
+                            }
+                            .disabled(isInLibrary || isAdding)
+                            .buttonStyle(PlainButtonStyle())
+                            .scaleEffect(isAdding ? 1.2 : 1.0)
+                            .animation(.easeInOut(duration: 0.2), value: isAdding)
+                        }
+                        .listRowBackground(Color.clear)
+                    }
+                }
+            }
+        }
+        .listStyle(.plain)
+        .background(Color.black.ignoresSafeArea())
+        .navigationTitle("Album")
+        .navigationBarTitleDisplayMode(.inline)
+        .task { await fetch() }
+        .refreshable { await fetch() }
+    }
+
+    private func totalDuration() -> String {
+        let total = tracks.reduce(0) { $0 + ($1.duration ?? 0) }
+        return mmss(total)
+    }
+
+    private func mmss(_ seconds: Int) -> String {
+        let m = seconds / 60
+        let s = seconds % 60
+        return "\(m):" + String(format: "%02d", s)
+    }
+
+    private func fetch() async {
+        errorMessage = nil
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            let resp = try await qobuzAPI.getAlbum(albumID: albumID)
+            let items = resp.tracks.items ?? []
+            var mapped: [TrackRow] = items.map {
+                TrackRow(
+                    id: String($0.id ?? Int.random(in: 1...9_999_999)),
+                    trackNumber: $0.trackNumber,
+                    title: $0.title ?? "Untitled",
+                    duration: $0.duration,
+                    isrc: $0.isrc,
+                    explicit: $0.parentalWarning ?? false,
+                    qobuzTrackId: $0.id
+                )
+            }
+            mapped.sort {
+                let a = $0.trackNumber ?? Int.max
+                let b = $1.trackNumber ?? Int.max
+                return a == b ? ($0.title < $1.title) : (a < b)
+            }
+            tracks = mapped
+            if tracks.isEmpty { errorMessage = "No tracks found for this album." }
+        } catch {
+            errorMessage = (error as? APIError)?.localizedDescription ?? error.localizedDescription
+        }
+    }
+}
 // MARK: - Add To Playlist Sheet (Apple Music style)
 struct AddToPlaylistSheet: View {
     let song: Song
