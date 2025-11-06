@@ -64,12 +64,12 @@ struct QobuzAlbumSearchData: Decodable {
 struct QobuzAlbumSearchItem: Decodable {
     let id: String
     let title: String
-    let artist: QobuzAlbumArtist?
-    let artists: [QobuzAlbumArtist]?
+    let artist: QobuzAlbumSearchArtist?
+    let artists: [QobuzAlbumSearchArtist]?
     let image: QobuzSearchImage?
 }
 
-struct QobuzAlbumArtist: Decodable {
+struct QobuzAlbumSearchArtist: Decodable {
     let id: Int?
     let name: String?
 }
@@ -278,6 +278,46 @@ struct DisplayAlbum: Identifiable, Hashable {
     let isExplicit: Bool
 }
 
+// MARK: - Qobuz Album Get Response
+struct QobuzAlbumGetResponse: Codable {
+    let id: String?
+    let title: String?
+    let artist: QobuzAlbumGetArtist?
+    let releaseDateDownload: String?
+    let tracks: QobuzAlbumTracks?
+    
+    enum CodingKeys: String, CodingKey {
+        case id, title, artist, tracks
+        case releaseDateDownload = "release_date_download"
+    }
+}
+
+struct QobuzAlbumGetArtist: Codable {
+    let id: Int?
+    let name: String?
+}
+
+struct QobuzAlbumTracks: Codable {
+    let offset: Int?
+    let limit: Int?
+    let total: Int?
+    let items: [QobuzAlbumTrackItem]?
+}
+
+struct QobuzAlbumTrackItem: Codable {
+    let id: Int?
+    let title: String?
+    let duration: Int?
+    let position: Int?
+    let isrc: String?
+    let parentalWarning: Bool?
+    
+    enum CodingKeys: String, CodingKey {
+        case id, title, duration, position, isrc
+        case parentalWarning = "parental_warning"
+    }
+}
+
 struct AlbumResponse: Codable { let success: Bool; let data: AlbumData? }
 struct AlbumData: Codable {
     let id: String?
@@ -289,6 +329,14 @@ struct AlbumData: Codable {
         case id, artist, tracks
         case trackIDs = "track_ids"
         case releaseDateDownload = "release_date_download"
+    }
+    
+    init(id: String?, artist: SimpleArtist?, releaseDateDownload: String?, trackIDs: [Int]?, tracks: TracksPage) {
+        self.id = id
+        self.artist = artist
+        self.releaseDateDownload = releaseDateDownload
+        self.trackIDs = trackIDs
+        self.tracks = tracks
     }
 }
 
@@ -306,6 +354,15 @@ struct TrackItem: Codable {
         case id, isrc, title, duration
         case trackNumber = "track_number"
         case parentalWarning = "parental_warning"
+    }
+    
+    init(id: Int?, isrc: String?, title: String?, duration: Int?, trackNumber: Int?, parentalWarning: Bool?) {
+        self.id = id
+        self.isrc = isrc
+        self.title = title
+        self.duration = duration
+        self.trackNumber = trackNumber
+        self.parentalWarning = parentalWarning
     }
 }
 
@@ -1170,23 +1227,77 @@ final class QobuzAPI: ObservableObject {
     }
 
     func getAlbum(albumID: String) async throws -> AlbumData {
-        guard var comps = URLComponents(string: "https://us.qqdl.site/api/get-album") else { throw APIError.invalidURL }
+        // Ensure we have a valid bearer token
+        try await ensureValidToken()
+        
+        guard let token = bearerToken else {
+            throw APIError.authenticationRequired
+        }
+        
+        guard var comps = URLComponents(string: "https://www.qobuz.com/api.json/0.2/album/get") else {
+            throw APIError.invalidURL
+        }
         comps.queryItems = [URLQueryItem(name: "album_id", value: albumID)]
         guard let url = comps.url else { throw APIError.invalidURL }
 
         var req = URLRequest(url: url)
+        req.setValue(appId, forHTTPHeaderField: "x-app-id")
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "authorization")
         req.timeoutInterval = 20
+        
         let (data, resp) = try await URLSession.shared.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw APIError.unknown }
-        guard (200..<300).contains(http.statusCode) else { throw APIError.badStatus(http.statusCode) }
+        
+        // If unauthorized, try refreshing token
+        if http.statusCode == 401 {
+            if let refresh = refreshToken {
+                try await refreshBearerToken(refreshToken: refresh)
+                // Retry with new token
+                return try await getAlbum(albumID: albumID)
+            } else {
+                throw APIError.authenticationRequired
+            }
+        }
+        
+        guard (200..<300).contains(http.statusCode) else {
+            throw APIError.badStatus(http.statusCode)
+        }
 
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .useDefaultKeys
         do {
-            let parsed = try decoder.decode(AlbumResponse.self, from: data)
-            guard parsed.success, let data = parsed.data else { throw APIError.emptyData }
-            return data
+            // The Qobuz API returns the album data directly, not wrapped in a success/data structure
+            let albumResponse = try decoder.decode(QobuzAlbumGetResponse.self, from: data)
+            
+            // Convert to AlbumData format for compatibility
+            let artist = SimpleArtist(
+                id: albumResponse.artist?.id,
+                name: albumResponse.artist?.name
+            )
+            
+            let tracksPage = TracksPage(
+                offset: albumResponse.tracks?.offset,
+                items: albumResponse.tracks?.items?.map { track in
+                    TrackItem(
+                        id: track.id,
+                        isrc: track.isrc,
+                        title: track.title,
+                        duration: track.duration,
+                        trackNumber: track.position,
+                        parentalWarning: track.parentalWarning
+                    )
+                }
+            )
+            
+            return AlbumData(
+                id: albumResponse.id,
+                artist: artist,
+                releaseDateDownload: albumResponse.releaseDateDownload,
+                trackIDs: albumResponse.tracks?.items?.compactMap { $0.id },
+                tracks: tracksPage
+            )
         } catch {
+            print("Album decoding error: \(error)")
             throw APIError.decodingFailed
         }
     }}
@@ -2427,31 +2538,38 @@ struct SearchView: View {
                             }
                         case .album:
                             ForEach(qobuzAPI.albums, id: \.id) { album in
-                                HStack {
-                                    if let art = album.image, let url = URL(string: art) {
-                                        AsyncImage(url: url) { phase in
-                                            if let image = phase.image {
-                                                image.resizable()
-                                            } else if phase.error != nil {
-                                                Image(systemName: "exclamationmark.triangle")
-                                                    .resizable()
-                                                    .foregroundColor(.gray)
-                                            } else {
-                                                Image(systemName: "opticaldisc")
-                                                    .resizable()
-                                                    .foregroundColor(.gray)
+                                NavigationLink(destination: AlbumDetailView(
+                                    albumID: album.id,
+                                    albumTitle: album.title,
+                                    albumArt: URL(string: album.image ?? "")
+                                )) {
+                                    HStack {
+                                        if let art = album.image, let url = URL(string: art) {
+                                            AsyncImage(url: url) { phase in
+                                                if let image = phase.image {
+                                                    image.resizable()
+                                                } else if phase.error != nil {
+                                                    Image(systemName: "exclamationmark.triangle")
+                                                        .resizable()
+                                                        .foregroundColor(.gray)
+                                                } else {
+                                                    Image(systemName: "opticaldisc")
+                                                        .resizable()
+                                                        .foregroundColor(.gray)
+                                                }
                                             }
+                                            .frame(width: 44, height: 44)
+                                            .cornerRadius(4)
                                         }
-                                        .frame(width: 44, height: 44)
-                                        .cornerRadius(4)
+                                        VStack(alignment: .leading) {
+                                            Text(album.title).foregroundColor(.white)
+                                            Text(album.artist).font(.caption).foregroundColor(.white.opacity(0.8))
+                                        }
+                                        Spacer()
                                     }
-                                    VStack(alignment: .leading) {
-                                        Text(album.title).foregroundColor(.white)
-                                        Text(album.artist).font(.caption).foregroundColor(.white.opacity(0.8))
-                                    }
-                                    Spacer()
+                                    .listRowBackground(Color.clear)
                                 }
-                                .listRowBackground(Color.clear)
+                                .buttonStyle(.plain)
                             }
                         case .artist:
                             ForEach(qobuzAPI.artists, id: \.id) { artist in
@@ -2759,10 +2877,16 @@ struct ArtistDetailView: View {
             artistData = data
             
             let buckets = data.artist.releases ?? []
+            
+            // Get albums and singles/EPs
             let albumBucket = buckets.first { $0.type.lowercased().trimmingCharacters(in: .whitespaces) == "album" }
-            let items = albumBucket?.items ?? []
+            let singleBucket = buckets.first { $0.type.lowercased().trimmingCharacters(in: .whitespaces) == "epsingle" }
+            
+            var allItems: [ReleaseItem] = []
+            allItems.append(contentsOf: albumBucket?.items ?? [])
+            allItems.append(contentsOf: singleBucket?.items ?? [])
 
-            let mapped = items.map { mapAlbum($0) }
+            let mapped = allItems.map { mapAlbum($0) }
             albums = mapped.sorted { ($0.releaseDate ?? .distantPast) > ($1.releaseDate ?? .distantPast) }
 
             if albums.isEmpty { errorMessage = "No albums found for this artist." }
@@ -2867,6 +2991,7 @@ struct AlbumDetailView: View {
     @State private var errorMessage: String?
     @State private var addedSongs: Set<String> = []
     @State private var addingSongs: Set<String> = []
+    @State private var needsAuthentication = false
 
     var body: some View {
         List {
@@ -2901,6 +3026,16 @@ struct AlbumDetailView: View {
             // Loading/Error States
             if isLoading {
                 Section { HStack { Spacer(); ProgressView(); Spacer() } }
+            } else if needsAuthentication || (errorMessage?.contains("log in") ?? false) {
+                Section {
+                    LoginView(qobuzAPI: qobuzAPI) {
+                        // After successful login, retry fetching album data
+                        Task {
+                            needsAuthentication = false
+                            await fetch()
+                        }
+                    }
+                }
             } else if let error = errorMessage {
                 Section {
                     VStack(spacing: 8) {
@@ -3028,8 +3163,16 @@ struct AlbumDetailView: View {
             }
             tracks = mapped
             if tracks.isEmpty { errorMessage = "No tracks found for this album." }
+        } catch let error as APIError {
+            switch error {
+            case .authenticationRequired:
+                needsAuthentication = true
+                errorMessage = nil
+            default:
+                errorMessage = error.localizedDescription
+            }
         } catch {
-            errorMessage = (error as? APIError)?.localizedDescription ?? error.localizedDescription
+            errorMessage = error.localizedDescription
         }
     }
 }
