@@ -4,6 +4,7 @@ import CoreData
 import AVFoundation
 import MediaPlayer
 import Combine
+import CommonCrypto
 
 // MARK: - BlurView (UIVisualEffectView wrapper)
 struct BlurView: UIViewRepresentable {
@@ -49,6 +50,78 @@ struct QobuzResponse: Decodable {
     let tracks: [QobuzTrack]?
 }
 
+// MARK: - Qobuz Search Response Models
+struct QobuzAlbumSearchResponse: Decodable {
+    let query: String?
+    let albums: QobuzAlbumSearchData?
+}
+
+struct QobuzAlbumSearchData: Decodable {
+    let offset: Int?
+    let items: [QobuzAlbumSearchItem]?
+}
+
+struct QobuzAlbumSearchItem: Decodable {
+    let id: String
+    let title: String
+    let artist: QobuzAlbumArtist?
+    let artists: [QobuzAlbumArtist]?
+    let image: QobuzSearchImage?
+}
+
+struct QobuzAlbumArtist: Decodable {
+    let id: Int?
+    let name: String?
+}
+
+struct QobuzTrackSearchResponse: Decodable {
+    let query: String?
+    let tracks: QobuzTrackSearchData?
+}
+
+struct QobuzTrackSearchData: Decodable {
+    let offset: Int?
+    let items: [QobuzTrackSearchItem]?
+}
+
+struct QobuzTrackSearchItem: Decodable {
+    let id: Int
+    let title: String
+    let performer: QobuzTrackPerformer?
+    let album: QobuzTrackAlbum?
+}
+
+struct QobuzTrackPerformer: Decodable {
+    let name: String?
+}
+
+struct QobuzTrackAlbum: Decodable {
+    let title: String?
+    let image: QobuzSearchImage?
+}
+
+struct QobuzArtistSearchResponse: Decodable {
+    let query: String?
+    let artists: QobuzArtistSearchData?
+}
+
+struct QobuzArtistSearchData: Decodable {
+    let offset: Int?
+    let items: [QobuzArtistSearchItem]?
+}
+
+struct QobuzArtistSearchItem: Decodable {
+    let id: Int
+    let name: String
+    let image: QobuzSearchImage?
+}
+
+struct QobuzSearchImage: Decodable {
+    let small: String?
+    let thumbnail: String?
+    let large: String?
+}
+
 struct QobuzTrack: Decodable {
     let id: Int
     let title: String
@@ -72,7 +145,68 @@ struct QobuzArtist: Identifiable {
 }
 
 
+// MARK: - Authentication Models
+struct LoginResponse: Codable {
+    let oauth2: OAuth2Response?
+    let user: UserInfo?
+}
+
+struct OAuth2Response: Codable {
+    let accessToken: String
+    let refreshToken: String?
+    let tokenType: String?
+    let expiresIn: Int?
+    
+    enum CodingKeys: String, CodingKey {
+        case accessToken = "access_token"
+        case refreshToken = "refresh_token"
+        case tokenType = "token_type"
+        case expiresIn = "expires_in"
+    }
+}
+
+struct UserInfo: Codable {
+    let id: Int?
+    let email: String?
+    let login: String?
+    let displayName: String?
+    
+    enum CodingKeys: String, CodingKey {
+        case id, email, login
+        case displayName = "display_name"
+    }
+}
+
 // MARK: - New API Models for Artist/Album Details
+struct ArtistPageResponse: Codable {
+    let id: Int
+    let name: LocalizedName
+    let artistCategory: String?
+    let biography: Biography?
+    let images: ArtistImages?
+    let releases: [ReleaseBucket]?
+    let topTracks: [TopTrack]?
+    
+    enum CodingKeys: String, CodingKey {
+        case id, name, biography, images, releases
+        case artistCategory = "artist_category"
+        case topTracks = "top_tracks"
+    }
+}
+
+struct TopTrack: Codable {
+    let id: Int
+    let title: String
+    let duration: Int?
+    let album: AlbumRef?
+}
+
+struct AlbumRef: Codable {
+    let id: String
+    let title: String?
+    let image: AlbumImages?
+}
+
 struct ArtistResponse: Codable { let success: Bool; let data: ArtistData? }
 struct ArtistData: Codable { let artist: Artist; let releases: [ReleaseBucket]? }
 
@@ -192,14 +326,16 @@ struct TrackRow: Identifiable, Hashable {
 }
 
 enum APIError: LocalizedError {
-    case invalidURL, badStatus(Int), decodingFailed, emptyData, unknown
+    case invalidURL, badStatus(Int), decodingFailed, emptyData, unknown, authenticationRequired, authenticationFailed
     var errorDescription: String? {
         switch self {
         case .invalidURL: return "The API URL is invalid."
-        case .badStatus(let code): return "Server returned status (code)."
+        case .badStatus(let code): return "Server returned status \(code)."
         case .decodingFailed: return "Failed to decode server response."
         case .emptyData: return "No data found."
         case .unknown: return "Something went wrong."
+        case .authenticationRequired: return "Please log in to continue."
+        case .authenticationFailed: return "Login failed. Please check your credentials."
         }
     }
 }
@@ -608,12 +744,183 @@ final class LibraryManager: ObservableObject {
     }
 }
 
+// MARK: - Search Content Type
+enum SearchContentType: String, CaseIterable {
+    case track = "Track"
+    case artist = "Artist"
+    case album = "Album"
+}
+
 // MARK: - Qobuz API Client
 final class QobuzAPI: ObservableObject {
     @Published var results: [QobuzTrack] = []
     @Published var errorMessage: String? = nil
     @Published var albums: [QobuzAlbum] = []
     @Published var artists: [QobuzArtist] = []
+    
+    // Bearer token management
+    private let appId = "650769754"
+    private let appSecret = "4e7670746604f63d161aab2d9ff02d6f" // From bearer.py
+    private let tokenKey = "qobuz_bearer_token"
+    private let refreshTokenKey = "qobuz_refresh_token"
+    private let tokenExpiryKey = "qobuz_token_expiry"
+    
+    private var bearerToken: String? {
+        get { UserDefaults.standard.string(forKey: tokenKey) }
+        set { UserDefaults.standard.set(newValue, forKey: tokenKey) }
+    }
+    
+    private var refreshToken: String? {
+        get { UserDefaults.standard.string(forKey: refreshTokenKey) }
+        set { UserDefaults.standard.set(newValue, forKey: refreshTokenKey) }
+    }
+    
+    private var tokenExpiry: Date? {
+        get {
+            guard let timeInterval = UserDefaults.standard.object(forKey: tokenExpiryKey) as? TimeInterval else { return nil }
+            return Date(timeIntervalSince1970: timeInterval)
+        }
+        set {
+            if let date = newValue {
+                UserDefaults.standard.set(date.timeIntervalSince1970, forKey: tokenExpiryKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: tokenExpiryKey)
+            }
+        }
+    }
+    
+    private func isTokenExpiringSoon() -> Bool {
+        guard let expiry = tokenExpiry else { return true }
+        // Consider token expiring if it expires within 5 minutes
+        return expiry.timeIntervalSinceNow < 300
+    }
+    
+    private func ensureValidToken() async throws {
+        if bearerToken == nil || isTokenExpiringSoon() {
+            if let refresh = refreshToken {
+                try await refreshBearerToken(refreshToken: refresh)
+            } else {
+                throw APIError.authenticationRequired
+            }
+        }
+    }
+    
+    // MARK: - Authentication Methods
+    func login(username: String, password: String) async throws {
+        let timestamp = Int(Date().timeIntervalSince1970)
+        
+        // Hash password with MD5 (if not already hashed - 32 hex chars)
+        let hashedPassword: String
+        if password.count == 32 && password.range(of: "^[0-9a-fA-F]{32}$", options: .regularExpression) != nil {
+            // Already hashed
+            hashedPassword = password.lowercased()
+        } else {
+            hashedPassword = md5Hash(password)
+        }
+        
+        // Generate request signature: oauth2loginpassword{password}username{username}{timestamp}{secret}
+        let sigString = "oauth2loginpassword\(hashedPassword)username\(username)\(timestamp)\(appSecret)"
+        let requestSig = md5Hash(sigString)
+        
+        guard var components = URLComponents(string: "https://www.qobuz.com/api.json/0.2/oauth2/login") else {
+            throw APIError.invalidURL
+        }
+        components.queryItems = [
+            URLQueryItem(name: "username", value: username),
+            URLQueryItem(name: "password", value: hashedPassword),
+            URLQueryItem(name: "request_ts", value: String(timestamp)),
+            URLQueryItem(name: "request_sig", value: requestSig)
+        ]
+        
+        guard let url = components.url else { throw APIError.invalidURL }
+        
+        var request = URLRequest(url: url)
+        request.setValue(appId, forHTTPHeaderField: "x-app-id")
+        request.timeoutInterval = 20
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else { throw APIError.unknown }
+        
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw APIError.authenticationFailed
+        }
+        
+        let decoder = JSONDecoder()
+        let loginResponse = try decoder.decode(LoginResponse.self, from: data)
+        
+        guard let oauth2 = loginResponse.oauth2 else { throw APIError.emptyData }
+        
+        // Store tokens
+        bearerToken = oauth2.accessToken
+        refreshToken = oauth2.refreshToken
+        
+        // Calculate expiry (typically expires_in is in seconds)
+        if let expiresIn = oauth2.expiresIn {
+            tokenExpiry = Date().addingTimeInterval(TimeInterval(expiresIn))
+        }
+    }
+    
+    private func refreshBearerToken(refreshToken token: String) async throws {
+        // OAuth2 refresh token endpoint
+        // Note: This endpoint may need to be verified from Qobuz API documentation
+        let timestamp = Int(Date().timeIntervalSince1970)
+        
+        // Generate request signature for refresh token
+        // Pattern: oauth2refreshTokenrefresh_token{refresh_token}request_ts{timestamp}{secret}
+        let sigString = "oauth2refreshTokenrefresh_token\(token)request_ts\(timestamp)\(appSecret)"
+        let requestSig = md5Hash(sigString)
+        
+        guard var components = URLComponents(string: "https://www.qobuz.com/api.json/0.2/oauth2/refreshToken") else {
+            throw APIError.invalidURL
+        }
+        components.queryItems = [
+            URLQueryItem(name: "refresh_token", value: token),
+            URLQueryItem(name: "request_ts", value: String(timestamp)),
+            URLQueryItem(name: "request_sig", value: requestSig)
+        ]
+        
+        guard let url = components.url else { throw APIError.invalidURL }
+        
+        var request = URLRequest(url: url)
+        request.setValue(appId, forHTTPHeaderField: "x-app-id")
+        request.timeoutInterval = 20
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else { throw APIError.unknown }
+        
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            // If refresh fails, clear tokens and require re-authentication
+            self.bearerToken = nil
+            self.refreshToken = nil
+            self.tokenExpiry = nil
+            throw APIError.authenticationRequired
+        }
+        
+        let decoder = JSONDecoder()
+        let loginResponse = try decoder.decode(LoginResponse.self, from: data)
+        
+        guard let oauth2 = loginResponse.oauth2 else { throw APIError.emptyData }
+        
+        // Store new tokens
+        bearerToken = oauth2.accessToken
+        if let newRefreshToken = oauth2.refreshToken {
+            self.refreshToken = newRefreshToken
+        }
+        
+        // Calculate expiry
+        if let expiresIn = oauth2.expiresIn {
+            tokenExpiry = Date().addingTimeInterval(TimeInterval(expiresIn))
+        }
+    }
+    
+    private func md5Hash(_ string: String) -> String {
+        let data = Data(string.utf8)
+        var digest = [UInt8](repeating: 0, count: Int(CC_MD5_DIGEST_LENGTH))
+        _ = data.withUnsafeBytes { bytes in
+            CC_MD5(bytes.baseAddress, CC_LONG(data.count), &digest)
+        }
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
 
     func search(query: String) {
         guard let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
@@ -638,14 +945,29 @@ final class QobuzAPI: ObservableObject {
         }.resume()
     }
 
-    func finalSearch(query: String) {
-        guard let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-              let url = URL(string: "https://us.qqdl.site/api/get-music?q=\(encoded)&offset=0") else { return }
+    func finalSearch(query: String, contentType: SearchContentType) {
         errorMessage = nil
-
-        URLSession.shared.dataTask(with: url) { data, _, error in
+        
+        switch contentType {
+        case .track:
+            searchTracks(query: query)
+        case .artist:
+            searchArtists(query: query)
+        case .album:
+            searchAlbums(query: query)
+        }
+    }
+    
+    private func searchTracks(query: String) {
+        guard let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "https://www.qobuz.com/api.json/0.2/track/search?limit=50&offset=0&query=\(encoded)&type=tracks") else { return }
+        
+        var request = URLRequest(url: url)
+        request.setValue("650769754", forHTTPHeaderField: "x-app-id")
+        
+        URLSession.shared.dataTask(with: request) { data, _, error in
             if let error = error {
-                print("Final search request error:", error)
+                print("Track search request error:", error)
                 DispatchQueue.main.async { self.errorMessage = "Search failed. Please try again." }
                 return
             }
@@ -654,57 +976,116 @@ final class QobuzAPI: ObservableObject {
                 return
             }
             do {
-                let decoded = try JSONDecoder().decode(QQDLRoot.self, from: data)
-                let trackItems = decoded.data?.tracks?.items ?? []
-                let albumItems = decoded.data?.albums?.items ?? []
-                let artistItems = decoded.data?.artists?.items ?? []
-
-                let mappedTracks: [QobuzTrack] = trackItems.map { item in
-                    let artistName = item.performer?.name ?? ""
-                    let albumTitle = item.album?.title
-                    let imageUrl = item.album?.image?.large ?? item.album?.image?.small ?? item.album?.image?.thumbnail
-                    return QobuzTrack(
+                let decoded = try JSONDecoder().decode(QobuzTrackSearchResponse.self, from: data)
+                let mappedTracks = (decoded.tracks?.items ?? []).map { item in
+                    QobuzTrack(
                         id: item.id,
                         title: item.title.trimmingCharacters(in: .whitespacesAndNewlines),
-                        artist: artistName,
-                        album: albumTitle,
-                        image: imageUrl,
+                        artist: item.performer?.name ?? "",
+                        album: item.album?.title,
+                        image: item.album?.image?.large ?? item.album?.image?.small ?? item.album?.image?.thumbnail,
                         url: nil
                     )
                 }
-
-                let mappedAlbums: [QobuzAlbum] = albumItems.map { item in
-                    let primaryArtist = item.artist?.name ?? item.artists?.first?.name ?? ""
-                    let imageUrl = item.image?.large ?? item.image?.small ?? item.image?.thumbnail
-                    return QobuzAlbum(
-                        id: item.id,
-                        title: item.title.trimmingCharacters(in: .whitespacesAndNewlines),
-                        artist: primaryArtist,
-                        image: imageUrl
-                    )
-                }
-
-                let mappedArtists: [QobuzArtist] = artistItems.map { item in
-                    let imageUrl = item.image?.large ?? item.image?.small ?? item.image?.thumbnail
-                    return QobuzArtist(
-                        id: item.id,
-                        name: item.name,
-                        image: imageUrl
-                    )
-                }
-
                 DispatchQueue.main.async {
                     self.results = mappedTracks
-                    self.albums = mappedAlbums
-                    self.artists = mappedArtists
-                    if mappedTracks.isEmpty && mappedAlbums.isEmpty && mappedArtists.isEmpty {
+                    self.albums = []
+                    self.artists = []
+                    if mappedTracks.isEmpty {
                         self.errorMessage = "No results found."
                     } else {
                         self.errorMessage = nil
                     }
                 }
             } catch {
-                print("Final search decoding error:", error)
+                print("Track search decoding error:", error)
+                DispatchQueue.main.async { self.errorMessage = "Unexpected response format." }
+            }
+        }.resume()
+    }
+    
+    private func searchArtists(query: String) {
+        guard let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "https://www.qobuz.com/api.json/0.2/artist/search?limit=50&offset=0&query=\(encoded)&type=artists") else { return }
+        
+        var request = URLRequest(url: url)
+        request.setValue("650769754", forHTTPHeaderField: "x-app-id")
+        
+        URLSession.shared.dataTask(with: request) { data, _, error in
+            if let error = error {
+                print("Artist search request error:", error)
+                DispatchQueue.main.async { self.errorMessage = "Search failed. Please try again." }
+                return
+            }
+            guard let data = data else {
+                DispatchQueue.main.async { self.errorMessage = "No data received." }
+                return
+            }
+            do {
+                let decoded = try JSONDecoder().decode(QobuzArtistSearchResponse.self, from: data)
+                let mappedArtists = (decoded.artists?.items ?? []).map { item in
+                    QobuzArtist(
+                        id: item.id,
+                        name: item.name,
+                        image: item.image?.large ?? item.image?.small ?? item.image?.thumbnail
+                    )
+                }
+                DispatchQueue.main.async {
+                    self.results = []
+                    self.albums = []
+                    self.artists = mappedArtists
+                    if mappedArtists.isEmpty {
+                        self.errorMessage = "No results found."
+                    } else {
+                        self.errorMessage = nil
+                    }
+                }
+            } catch {
+                print("Artist search decoding error:", error)
+                DispatchQueue.main.async { self.errorMessage = "Unexpected response format." }
+            }
+        }.resume()
+    }
+    
+    private func searchAlbums(query: String) {
+        guard let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "https://www.qobuz.com/api.json/0.2/album/search?limit=50&offset=0&query=\(encoded)&type=albums") else { return }
+        
+        var request = URLRequest(url: url)
+        request.setValue("650769754", forHTTPHeaderField: "x-app-id")
+        
+        URLSession.shared.dataTask(with: request) { data, _, error in
+            if let error = error {
+                print("Album search request error:", error)
+                DispatchQueue.main.async { self.errorMessage = "Search failed. Please try again." }
+                return
+            }
+            guard let data = data else {
+                DispatchQueue.main.async { self.errorMessage = "No data received." }
+                return
+            }
+            do {
+                let decoded = try JSONDecoder().decode(QobuzAlbumSearchResponse.self, from: data)
+                let mappedAlbums = (decoded.albums?.items ?? []).map { item in
+                    QobuzAlbum(
+                        id: item.id,
+                        title: item.title.trimmingCharacters(in: .whitespacesAndNewlines),
+                        artist: item.artist?.name ?? item.artists?.first?.name ?? "",
+                        image: item.image?.large ?? item.image?.small ?? item.image?.thumbnail
+                    )
+                }
+                DispatchQueue.main.async {
+                    self.results = []
+                    self.albums = mappedAlbums
+                    self.artists = []
+                    if mappedAlbums.isEmpty {
+                        self.errorMessage = "No results found."
+                    } else {
+                        self.errorMessage = nil
+                    }
+                }
+            } catch {
+                print("Album search decoding error:", error)
                 DispatchQueue.main.async { self.errorMessage = "Unexpected response format." }
             }
         }.resume()
@@ -725,23 +1106,65 @@ final class QobuzAPI: ObservableObject {
 
     // MARK: - New Artist/Album API Methods
     func getArtist(artistID: String) async throws -> ArtistData {
-        guard var comps = URLComponents(string: "https://us.qqdl.site/api/get-artist") else { throw APIError.invalidURL }
-        comps.queryItems = [URLQueryItem(name: "artist_id", value: artistID)]
+        // Ensure we have a valid bearer token
+        try await ensureValidToken()
+        
+        guard let token = bearerToken else {
+            throw APIError.authenticationRequired
+        }
+        
+        guard var comps = URLComponents(string: "https://www.qobuz.com/api.json/0.2/artist/page") else {
+            throw APIError.invalidURL
+        }
+        comps.queryItems = [
+            URLQueryItem(name: "artist_id", value: artistID),
+            URLQueryItem(name: "sort", value: "release_date"),
+            URLQueryItem(name: "order", value: "desc"),
+            URLQueryItem(name: "limit", value: "100")
+        ]
         guard let url = comps.url else { throw APIError.invalidURL }
 
         var req = URLRequest(url: url)
+        req.setValue(appId, forHTTPHeaderField: "x-app-id")
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "authorization")
         req.timeoutInterval = 20
+        
         let (data, resp) = try await URLSession.shared.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw APIError.unknown }
-        guard (200..<300).contains(http.statusCode) else { throw APIError.badStatus(http.statusCode) }
+        
+        // If unauthorized, try refreshing token
+        if http.statusCode == 401 {
+            if let refresh = refreshToken {
+                try await refreshBearerToken(refreshToken: refresh)
+                // Retry with new token
+                return try await getArtist(artistID: artistID)
+            } else {
+                throw APIError.authenticationRequired
+            }
+        }
+        
+        guard (200..<300).contains(http.statusCode) else {
+            throw APIError.badStatus(http.statusCode)
+        }
 
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .useDefaultKeys
         do {
-            let parsed = try decoder.decode(ArtistResponse.self, from: data)
-            guard parsed.success, let artistData = parsed.data else { throw APIError.emptyData }
-            return artistData
+            let parsed = try decoder.decode(ArtistPageResponse.self, from: data)
+            
+            // Convert to ArtistData format for compatibility
+            let artist = Artist(
+                id: parsed.id,
+                name: parsed.name,
+                artistCategory: parsed.artistCategory,
+                biography: parsed.biography,
+                images: parsed.images,
+                releases: parsed.releases
+            )
+            
+            return ArtistData(artist: artist, releases: parsed.releases)
         } catch {
+            print("Decoding error: \(error)")
             throw APIError.decodingFailed
         }
     }
@@ -1761,12 +2184,6 @@ enum SearchMode: String, CaseIterable {
     case newMusic = "New Music"
 }
 
-enum SearchContentType: String, CaseIterable {
-    case track = "Track"
-    case artist = "Artist" 
-    case album = "Album"
-}
-
 struct SearchView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @EnvironmentObject var player: MusicPlayer
@@ -1801,7 +2218,7 @@ struct SearchView: View {
                         searchFocused = false
                         if mode == .newMusic {
                             let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-                            if !trimmed.isEmpty { qobuzAPI.finalSearch(query: trimmed) }
+                            if !trimmed.isEmpty { qobuzAPI.finalSearch(query: trimmed, contentType: contentType) }
                         }
                     }
                     .onChange(of: query) { newValue in
@@ -1826,6 +2243,14 @@ struct SearchView: View {
                         } else if !isSearching {
                             withAnimation(.easeOut(duration: 0.35)) {
                                 showPicker = !query.isEmpty
+                            }
+                        }
+                    }
+                    .onChange(of: contentType) { newType in
+                        if mode == .newMusic && isSearching {
+                            let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !trimmed.isEmpty {
+                                qobuzAPI.finalSearch(query: trimmed, contentType: newType)
                             }
                         }
                     }
@@ -2075,6 +2500,124 @@ struct SearchView: View {
     }
 }
 
+// MARK: - Login View
+struct LoginView: View {
+    @ObservedObject var qobuzAPI: QobuzAPI
+    let onLoginSuccess: () -> Void
+    
+    @State private var username = ""
+    @State private var password = ""
+    @State private var isLoading = false
+    @State private var errorMessage: String?
+    @FocusState private var focusedField: LoginField?
+    
+    enum LoginField {
+        case username, password
+    }
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "person.circle.fill")
+                .font(.system(size: 60))
+                .foregroundColor(.white.opacity(0.8))
+            
+            Text("Login Required")
+                .font(.title2)
+                .fontWeight(.bold)
+                .foregroundColor(.white)
+            
+            Text("Please enter your Qobuz credentials to view artist details")
+                .font(.subheadline)
+                .foregroundColor(.white.opacity(0.7))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+            
+            VStack(spacing: 16) {
+                TextField("Email or Username", text: $username)
+                    .textContentType(.emailAddress)
+                    .autocapitalization(.none)
+                    .autocorrectionDisabled()
+                    .keyboardType(.emailAddress)
+                    .padding(12)
+                    .background(Color.white.opacity(0.1))
+                    .cornerRadius(10)
+                    .foregroundColor(.white)
+                    .focused($focusedField, equals: .username)
+                    .submitLabel(.next)
+                    .onSubmit {
+                        focusedField = .password
+                    }
+                
+                SecureField("Password", text: $password)
+                    .textContentType(.password)
+                    .autocapitalization(.none)
+                    .autocorrectionDisabled()
+                    .padding(12)
+                    .background(Color.white.opacity(0.1))
+                    .cornerRadius(10)
+                    .foregroundColor(.white)
+                    .focused($focusedField, equals: .password)
+                    .submitLabel(.go)
+                    .onSubmit {
+                        Task { await performLogin() }
+                    }
+            }
+            .padding(.horizontal)
+            
+            if let error = errorMessage {
+                Text(error)
+                    .font(.caption)
+                    .foregroundColor(.red)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+            }
+            
+            Button(action: {
+                Task { await performLogin() }
+            }) {
+                HStack {
+                    if isLoading {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: .black))
+                    } else {
+                        Text("Login")
+                            .fontWeight(.semibold)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(14)
+                .background(isLoading ? Color.gray : Color.white)
+                .foregroundColor(isLoading ? .white : .black)
+                .cornerRadius(10)
+            }
+            .disabled(isLoading || username.isEmpty || password.isEmpty)
+            .padding(.horizontal)
+        }
+        .padding(.vertical, 40)
+        .frame(maxWidth: .infinity)
+        .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 16))
+        .padding()
+    }
+    
+    private func performLogin() async {
+        guard !username.isEmpty && !password.isEmpty else { return }
+        
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+        
+        do {
+            try await qobuzAPI.login(username: username, password: password)
+            // Login successful, call the success callback
+            onLoginSuccess()
+        } catch let error as APIError {
+            errorMessage = error.localizedDescription
+        } catch {
+            errorMessage = "Login failed: \(error.localizedDescription)"
+        }
+    }
+}
+
 struct ArtistDetailView: View {
     let artist: QobuzArtist
     @StateObject private var qobuzAPI = QobuzAPI()
@@ -2082,6 +2625,8 @@ struct ArtistDetailView: View {
     @State private var albums: [DisplayAlbum] = []
     @State private var isLoading = false
     @State private var errorMessage: String?
+    @State private var showLogin = false
+    @State private var needsAuthentication = false
 
     var body: some View {
         ScrollView {
@@ -2166,6 +2711,14 @@ struct ArtistDetailView: View {
                 // Loading/Error States
                 if isLoading {
                     HStack { Spacer(); ProgressView().padding(.vertical, 12); Spacer() }
+                } else if needsAuthentication || (errorMessage?.contains("log in") ?? false) {
+                    LoginView(qobuzAPI: qobuzAPI) {
+                        // After successful login, retry fetching artist data
+                        Task {
+                            needsAuthentication = false
+                            await fetchArtistData()
+                        }
+                    }
                 } else if let error = errorMessage {
                     VStack(spacing: 12) {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
@@ -2213,8 +2766,16 @@ struct ArtistDetailView: View {
             albums = mapped.sorted { ($0.releaseDate ?? .distantPast) > ($1.releaseDate ?? .distantPast) }
 
             if albums.isEmpty { errorMessage = "No albums found for this artist." }
+        } catch let error as APIError {
+            switch error {
+            case .authenticationRequired:
+                needsAuthentication = true
+                errorMessage = nil
+            default:
+                errorMessage = error.localizedDescription
+            }
         } catch {
-            errorMessage = (error as? APIError)?.localizedDescription ?? error.localizedDescription
+            errorMessage = error.localizedDescription
         }
     }
 
