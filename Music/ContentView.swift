@@ -648,24 +648,27 @@ final class MusicPlayer: ObservableObject {
             return
         }
         if let idx = currentIndex {
-            if isShuffling {
-                // pick a random different index
-                if queue.count == 1 {
-                    play(song: queue[0]); currentIndex = 0; return
-                }
-                var newIndex = idx
-                while newIndex == idx { newIndex = Int.random(in: 0..<queue.count) }
-                currentIndex = newIndex
-                play(song: queue[newIndex])
-            } else {
-                let nextIndex = idx + 1
-                if nextIndex < queue.count {
-                    currentIndex = nextIndex
-                    play(song: queue[nextIndex])
-                } else if repeatMode == .all {
+            // When shuffling, the queue is already shuffled, so just move to next in the shuffled order
+            let nextIndex = idx + 1
+            if nextIndex < queue.count {
+                currentIndex = nextIndex
+                play(song: queue[nextIndex])
+            } else if isShuffling {
+                // Infinite shuffle: reshuffle the queue and continue
+                let currentSong = queue[idx]
+                rebuildPlayQueue(preserving: currentSong)
+                // Move to next song in newly shuffled queue
+                if let newIdx = currentIndex, newIdx + 1 < queue.count {
+                    currentIndex = newIdx + 1
+                    play(song: queue[newIdx + 1])
+                } else if !queue.isEmpty {
                     currentIndex = 0
                     play(song: queue[0])
                 }
+            } else if repeatMode == .all {
+                // Wrap around to beginning of queue
+                currentIndex = 0
+                play(song: queue[0])
             }
         }
     }
@@ -679,13 +682,8 @@ final class MusicPlayer: ObservableObject {
         if currentTime > 3 { AudioPlayer.shared.seek(to: 0); return }
         guard !queue.isEmpty else { AudioPlayer.shared.seek(to: 0); return }
         guard let idx = currentIndex else { AudioPlayer.shared.seek(to: 0); return }
-        if isShuffling {
-            if queue.count == 1 { play(song: queue[0]); currentIndex = 0; return }
-            var newIndex = idx
-            while newIndex == idx { newIndex = Int.random(in: 0..<queue.count) }
-            currentIndex = newIndex
-            play(song: queue[newIndex])
-        } else if idx - 1 >= 0 {
+        // When shuffling, the queue is already shuffled, so just move to previous in the shuffled order
+        if idx - 1 >= 0 {
             let prev = queue[idx - 1]
             currentIndex = idx - 1
             play(song: prev)
@@ -1938,10 +1936,10 @@ struct UpNextView: View {
             List {
                 if let idx = player.currentIndex {
                     Section(header: Text("Up Next").foregroundColor(.white)) {
-                        ForEach(Array(player.upcoming.enumerated()), id: \.element) { item in
-                            let song = item.element
+                        ForEach(player.upcoming, id: \.objectID) { song in
                             HStack {
                                 LocalArtworkView(song: song, size: 44)
+                                    .id(song.objectID)
                                 VStack(alignment: .leading) {
                                     Text(song.title ?? "Unknown Title").foregroundColor(.white)
                                     Text(song.artist ?? "Unknown Artist").font(.caption).foregroundColor(.white.opacity(0.8))
@@ -2033,12 +2031,20 @@ struct LocalArtworkView: View {
         // Determine best local artwork path to load
         let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         var preferredPath: String? = nil
-        if let id = song.id {
-            let defaultLocal = documentsDirectory.appendingPathComponent("Artwork", isDirectory: true).appendingPathComponent("\(id.uuidString).jpg").path
-            if FileManager.default.fileExists(atPath: defaultLocal) { preferredPath = defaultLocal }
+        
+        // First, check if song.artwork points to a valid file (shared album artwork or old per-song artwork)
+        if let art = song.artwork, !art.isEmpty, !art.hasPrefix("http") {
+            if FileManager.default.fileExists(atPath: art) {
+                preferredPath = art
+            }
         }
-        if preferredPath == nil, let art = song.artwork, !art.isEmpty, !art.hasPrefix("http") {
-            preferredPath = art
+        
+        // Fallback: check for old per-song artwork path (for backward compatibility)
+        if preferredPath == nil, let id = song.id {
+            let defaultLocal = documentsDirectory.appendingPathComponent("Artwork", isDirectory: true).appendingPathComponent("\(id.uuidString).jpg").path
+            if FileManager.default.fileExists(atPath: defaultLocal) {
+                preferredPath = defaultLocal
+            }
         }
         guard let pathToLoad = preferredPath else {
             // No local artwork available right now; retry in case it appears shortly
