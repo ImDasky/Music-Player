@@ -775,9 +775,33 @@ final class LibraryManager: ObservableObject {
     }
     
     func isSongInLibrary(title: String, artist: String) -> Bool {
-        let existingSongs = getAllSongs()
-        return existingSongs.contains { song in
-            song.title == title && song.artist == artist
+        let request: NSFetchRequest<Song> = Song.fetchRequest()
+        request.predicate = NSPredicate(format: "title ==[cd] %@ AND artist ==[cd] %@", title, artist)
+        request.fetchLimit = 1
+        do {
+            let results = try viewContext.fetch(request)
+            return !results.isEmpty
+        } catch {
+            print("Error checking if song is in library: \(error)")
+            return false
+        }
+    }
+    
+    func isSongInLibrary(track: QobuzTrack) -> Bool {
+        let request: NSFetchRequest<Song> = Song.fetchRequest()
+        // Match by title AND artist (required), and optionally by album if provided
+        if let album = track.album {
+            request.predicate = NSPredicate(format: "title ==[cd] %@ AND artist ==[cd] %@ AND album ==[cd] %@", track.title, track.artist, album)
+        } else {
+            request.predicate = NSPredicate(format: "title ==[cd] %@ AND artist ==[cd] %@", track.title, track.artist)
+        }
+        request.fetchLimit = 1
+        do {
+            let results = try viewContext.fetch(request)
+            return !results.isEmpty
+        } catch {
+            print("Error checking if song is in library: \(error)")
+            return false
         }
     }
     
@@ -1487,9 +1511,15 @@ struct FullPlayerView: View {
     @EnvironmentObject var player: MusicPlayer
     @ObservedObject private var audio = AudioPlayer.shared
     @Environment(\.managedObjectContext) private var viewContext
+    @EnvironmentObject var libraryManager: LibraryManager
     @State private var isScrubbing = false
     @State private var tempTime: Double = 0
     @State private var showUpNext = false
+    @State private var showPlaylistSheet = false
+    @State private var showAlbumView = false
+    @State private var albumID: String? = nil
+    @State private var albumTitle: String? = nil
+    @State private var albumArt: URL? = nil
 
     // Use MusicPlayer's repeat mode
 
@@ -1629,9 +1659,26 @@ struct FullPlayerView: View {
                     }
                     Spacer()
                     Menu {
-                        Picker("Quality", selection: Binding(get: { AudioPlayer.shared.audioQuality }, set: { AudioPlayer.shared.setAudioQuality($0) })) {
-                            ForEach(AudioPlayer.AudioQuality.allCases, id: \.self) { q in
-                                Text(q.rawValue).tag(q)
+                        // Only show these options if currentSong is a Song (not TempSong)
+                        if let song = player.currentSong as? Song {
+                            Button(role: .destructive) {
+                                libraryManager.deleteSong(song)
+                            } label: {
+                                Label("Delete from Library", systemImage: "trash")
+                            }
+                            Divider()
+                            Button {
+                                showPlaylistSheet = true
+                            } label: {
+                                Label("Add to Playlist", systemImage: "text.badge.plus")
+                            }
+                            Divider()
+                            Button {
+                                Task {
+                                    await showAlbum(for: song)
+                                }
+                            } label: {
+                                Label("Show Album", systemImage: "opticaldisc")
                             }
                         }
                     } label: {
@@ -1653,6 +1700,113 @@ struct FullPlayerView: View {
             .sheet(isPresented: $showUpNext) {
                 UpNextView().environmentObject(player)
             }
+            .sheet(isPresented: $showPlaylistSheet) {
+                if let song = player.currentSong as? Song {
+                    AddToPlaylistSheet(song: song) { showPlaylistSheet = false }
+                }
+            }
+            .sheet(isPresented: $showAlbumView) {
+                if let albumID = albumID, let albumTitle = albumTitle {
+                    NavigationView {
+                        AlbumDetailView(
+                            albumID: albumID,
+                            albumTitle: albumTitle,
+                            albumArt: albumArt
+                        )
+                        .environmentObject(libraryManager)
+                        .environmentObject(player)
+                    }
+                }
+            }
+    }
+    
+    private func showAlbum(for song: Song) async {
+        // Get album ID from track details
+        // qobuzTrackId is Int32 (non-optional), so check if it's greater than 0
+        if song.qobuzTrackId > 0 {
+            // Fetch track details to get album ID
+            let trackId = Int(song.qobuzTrackId)
+            do {
+                try await fetchTrackAlbum(trackId: trackId)
+            } catch {
+                print("Failed to fetch track album: \(error)")
+            }
+        } else {
+            // If no track ID, try to search for album by name
+            if let albumName = song.album {
+                // Search for album using Qobuz API
+                let qobuzAPI = QobuzAPI()
+                qobuzAPI.finalSearch(query: albumName, contentType: .album)
+                
+                // Wait a bit for results to populate
+                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
+                
+                // Find matching album
+                if let album = qobuzAPI.albums.first(where: { $0.title.localizedCaseInsensitiveContains(albumName) || albumName.localizedCaseInsensitiveContains($0.title) }) {
+                    self.albumID = album.id
+                    self.albumTitle = album.title
+                    self.albumArt = URL(string: album.image ?? "")
+                    self.showAlbumView = true
+                }
+            }
+        }
+    }
+    
+    private func fetchTrackAlbum(trackId: Int) async throws {
+        // Ensure we have a valid bearer token
+        let qobuzAPI = QobuzAPI()
+        try await qobuzAPI.ensureValidToken()
+        
+        guard let token = qobuzAPI.currentBearerToken else {
+            return
+        }
+        
+        // Use track/get endpoint to get track details including album
+        guard var comps = URLComponents(string: "https://www.qobuz.com/api.json/0.2/track/get") else {
+            return
+        }
+        comps.queryItems = [URLQueryItem(name: "track_id", value: String(trackId))]
+        guard let url = comps.url else { return }
+        
+        var req = URLRequest(url: url)
+        req.setValue("650769754", forHTTPHeaderField: "x-app-id")
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "authorization")
+        req.timeoutInterval = 20
+        
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { return }
+        
+        guard (200..<300).contains(http.statusCode) else {
+            return
+        }
+        
+        // Decode track response to get album ID
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .useDefaultKeys
+        
+        // Try to decode as JSON and extract album ID
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let album = json["album"] as? [String: Any] {
+            // Extract album ID (can be String or Int)
+            var albumId: String? = nil
+            if let idString = album["id"] as? String {
+                albumId = idString
+            } else if let idInt = album["id"] as? Int {
+                albumId = String(idInt)
+            }
+            
+            if let albumId = albumId {
+                self.albumID = albumId
+                self.albumTitle = album["title"] as? String ?? (player.currentSong as? Song)?.album
+                if let image = album["image"] as? [String: Any],
+                   let large = image["large"] as? String {
+                    self.albumArt = URL(string: large)
+                } else if let artwork = (player.currentSong as? Song)?.artwork {
+                    self.albumArt = URL(string: artwork)
+                }
+                self.showAlbumView = true
+            }
+        }
     }
 }
 
@@ -2512,7 +2666,7 @@ struct SearchView: View {
                                     Spacer()
 
                                     let songKey = "\(track.title)-\(track.artist)"
-                                    let isInLibrary = libraryManager.isSongInLibrary(title: track.title, artist: track.artist)
+                                    let isInLibrary = libraryManager.isSongInLibrary(track: track)
                                     let wasJustAdded = addedSongs.contains(songKey)
                                     let isAdding = addingSongs.contains(songKey)
 
@@ -3140,8 +3294,17 @@ struct AlbumDetailView: View {
                             Spacer()
                             
                             // Add to library button
-                            let songKey = "\(track.title)-\(albumTitle)"
-                            let isInLibrary = libraryManager.isSongInLibrary(title: track.title, artist: albumTitle)
+                            // Create QobuzTrack to check if song is in library (same as track search)
+                            let qobuzTrackForCheck = QobuzTrack(
+                                id: track.qobuzTrackId ?? 0,
+                                title: track.title,
+                                artist: albumArtist ?? albumTitle,
+                                album: albumTitle,
+                                image: albumArt?.absoluteString,
+                                url: nil
+                            )
+                            let songKey = "\(track.title)-\(albumArtist ?? albumTitle)"
+                            let isInLibrary = libraryManager.isSongInLibrary(track: qobuzTrackForCheck)
                             let wasJustAdded = addedSongs.contains(songKey)
                             let isAdding = addingSongs.contains(songKey)
                             
