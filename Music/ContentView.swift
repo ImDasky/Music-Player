@@ -284,12 +284,21 @@ struct QobuzAlbumGetResponse: Codable {
     let title: String?
     let artist: QobuzAlbumGetArtist?
     let releaseDateDownload: String?
+    let releaseDateOriginal: String?
+    let genre: QobuzAlbumGenre?
     let tracks: QobuzAlbumTracks?
     
     enum CodingKeys: String, CodingKey {
-        case id, title, artist, tracks
+        case id, title, artist, tracks, genre
         case releaseDateDownload = "release_date_download"
+        case releaseDateOriginal = "release_date_original"
     }
+}
+
+struct QobuzAlbumGenre: Codable {
+    let id: Int?
+    let name: String?
+    let slug: String?
 }
 
 struct QobuzAlbumGetArtist: Codable {
@@ -378,7 +387,7 @@ struct TrackRow: Identifiable, Hashable {
     var durationString: String {
         let secs = duration ?? 0
         let m = secs / 60, s = secs % 60
-        return "(m):" + String(format: "%02d", s)
+        return "\(m):" + String(format: "%02d", s)
     }
 }
 
@@ -827,6 +836,11 @@ final class QobuzAPI: ObservableObject {
         set { UserDefaults.standard.set(newValue, forKey: tokenKey) }
     }
     
+    // Public accessor for bearer token
+    var currentBearerToken: String? {
+        return bearerToken
+    }
+    
     private var refreshToken: String? {
         get { UserDefaults.standard.string(forKey: refreshTokenKey) }
         set { UserDefaults.standard.set(newValue, forKey: refreshTokenKey) }
@@ -852,7 +866,7 @@ final class QobuzAPI: ObservableObject {
         return expiry.timeIntervalSinceNow < 300
     }
     
-    private func ensureValidToken() async throws {
+    func ensureValidToken() async throws {
         if bearerToken == nil || isTokenExpiringSoon() {
             if let refresh = refreshToken {
                 try await refreshBearerToken(refreshToken: refresh)
@@ -1277,13 +1291,15 @@ final class QobuzAPI: ObservableObject {
             
             let tracksPage = TracksPage(
                 offset: albumResponse.tracks?.offset,
-                items: albumResponse.tracks?.items?.map { track in
-                    TrackItem(
+                items: albumResponse.tracks?.items?.enumerated().map { index, track in
+                    // Use position if available and > 0, otherwise use index + 1 (1-based track numbers)
+                    let trackNum = (track.position != nil && track.position! > 0) ? track.position! : (index + 1)
+                    return TrackItem(
                         id: track.id,
                         isrc: track.isrc,
                         title: track.title,
                         duration: track.duration,
-                        trackNumber: track.position,
+                        trackNumber: trackNum,
                         parentalWarning: track.parentalWarning
                     )
                 }
@@ -2314,104 +2330,117 @@ struct SearchView: View {
     var body: some View {
         NavigationView {
             VStack(spacing: 12) {
-                TextField("Search", text: $query)
-                    .padding(10)
-                    .background(Color(white: 0.15).opacity(0.9))
-                    .cornerRadius(10)
-                    .foregroundColor(.white)
+                // ZStack to layer picker behind search bar
+                ZStack(alignment: .top) {
+                    // Picker layer (behind)
+                    ZStack(alignment: .leading) {
+                        // Animate the entire ZStack content changes
+                        if showPicker {
+                            Picker("", selection: $mode) {
+                                ForEach(SearchMode.allCases, id: \.self) { mode in
+                                    Text(mode.rawValue).tag(mode)
+                                }
+                            }
+                            .pickerStyle(SegmentedPickerStyle())
+                            .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .move(edge: .top).combined(with: .opacity)))
+                        }
+                        if isSearching {
+                            HStack(spacing: 8) {
+                                ForEach(SearchContentType.allCases, id: \.self) { type in
+                                    Button(action: {
+                                        withAnimation(.easeInOut(duration: 0.22)) { contentType = type }
+                                    }) {
+                                        Text(type.rawValue)
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundColor(contentType == type ? .black : .white)
+                                            .padding(.horizontal, 12)
+                                            .padding(.vertical, 6)
+                                            .background(
+                                                RoundedRectangle(cornerRadius: 14)
+                                                    .fill(contentType == type ? Color.white : Color.white.opacity(0.2))
+                                            )
+                                    }
+                                    .scaleEffect(contentType == type ? 1.0 : 0.96)
+                                    .animation(.spring(response: 0.28, dampingFraction: 0.85), value: contentType)
+                                    .buttonStyle(PlainButtonStyle())
+                                }
+                            }
+                            .padding(.leading, 10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity), removal: .move(edge: .bottom).combined(with: .opacity)))
+                        }
+                    }
+                    .animation(.easeInOut(duration: 0.35), value: showPicker || isSearching)
+                    .frame(height: 34)
                     .padding(.horizontal)
-                    .focused($searchFocused)
-                    .onSubmit {
-                        withAnimation(.easeOut(duration: 0.35)) {
-                            isSearching = true
-                            showPicker = false
-                        }
-                        searchFocused = false
-                        if mode == .newMusic {
-                            let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-                            if !trimmed.isEmpty { qobuzAPI.finalSearch(query: trimmed, contentType: contentType) }
-                        }
-                    }
-                    .onChange(of: query) { newValue in
-                        qobuzAPI.errorMessage = nil
-                        if !isSearching {
+                    .padding(.top, 50) // Position behind search bar
+                    
+                    // Search bar layer (on top)
+                    TextField("Search", text: $query)
+                        .padding(10)
+                        .background(Color(white: 0.15).opacity(0.9))
+                        .cornerRadius(10)
+                        .foregroundColor(.white)
+                        .padding(.horizontal)
+                        .focused($searchFocused)
+                        .onSubmit {
                             withAnimation(.easeOut(duration: 0.35)) {
-                                showPicker = searchFocused || !newValue.isEmpty
+                                isSearching = true
+                                showPicker = false
+                            }
+                            searchFocused = false
+                            if mode == .newMusic {
+                                let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+                                if !trimmed.isEmpty { qobuzAPI.finalSearch(query: trimmed, contentType: contentType) }
                             }
                         }
-                        if mode == .newMusic, !newValue.isEmpty {
-                            qobuzAPI.search(query: newValue)
-                        } else {
-                            filteredLibrary = libraryManager.searchSongs(query: newValue)
-                        }
-                    }
-                    .onChange(of: searchFocused) { focused in
-                        if focused {
-                            withAnimation(.easeOut(duration: 0.35)) {
-                                isSearching = false
-                                showPicker = true
+                        .onChange(of: query) { newValue in
+                            qobuzAPI.errorMessage = nil
+                            if !isSearching {
+                                withAnimation(.easeOut(duration: 0.35)) {
+                                    showPicker = searchFocused || !newValue.isEmpty
+                                }
                             }
-                        } else if !isSearching {
-                            withAnimation(.easeOut(duration: 0.35)) {
-                                showPicker = !query.isEmpty
-                            }
-                        }
-                    }
-                    .onChange(of: contentType) { newType in
-                        if mode == .newMusic && isSearching {
-                            let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-                            if !trimmed.isEmpty {
-                                qobuzAPI.finalSearch(query: trimmed, contentType: newType)
+                            if mode == .newMusic, !newValue.isEmpty {
+                                qobuzAPI.search(query: newValue)
+                            } else if mode == .library {
+                                // Only show library results when user has typed something
+                                if newValue.isEmpty {
+                                    filteredLibrary = []
+                                } else {
+                                    filteredLibrary = libraryManager.searchSongs(query: newValue)
+                                }
                             }
                         }
-                    }
+                        .onChange(of: searchFocused) { focused in
+                            if focused {
+                                withAnimation(.easeOut(duration: 0.35)) {
+                                    isSearching = false
+                                    showPicker = true
+                                }
+                            } else if !isSearching {
+                                withAnimation(.easeOut(duration: 0.35)) {
+                                    showPicker = !query.isEmpty
+                                }
+                            }
+                        }
+                        .onChange(of: contentType) { newType in
+                            if mode == .newMusic && isSearching {
+                                let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+                                if !trimmed.isEmpty {
+                                    qobuzAPI.finalSearch(query: trimmed, contentType: newType)
+                                }
+                            }
+                        }
+                }
+                .frame(height: 84) // Height to accommodate search bar + picker
+                
                 if let error = qobuzAPI.errorMessage {
                     Text(error)
                         .font(.caption)
                         .foregroundColor(.red)
                         .padding(.horizontal)
                 }
-                // Segmented picker or bubbles occupy same space
-                ZStack(alignment: .leading) {
-                    // Animate the entire ZStack content changes
-                    if showPicker {
-                        Picker("", selection: $mode) {
-                            ForEach(SearchMode.allCases, id: \.self) { mode in
-                                Text(mode.rawValue).tag(mode)
-                            }
-                        }
-                        .pickerStyle(SegmentedPickerStyle())
-                        .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .move(edge: .top).combined(with: .opacity)))
-                    }
-                    if isSearching {
-                        HStack(spacing: 8) {
-                            ForEach(SearchContentType.allCases, id: \.self) { type in
-                                Button(action: {
-                                    withAnimation(.easeInOut(duration: 0.22)) { contentType = type }
-                                }) {
-                                    Text(type.rawValue)
-                                        .font(.system(size: 13, weight: .semibold))
-                                        .foregroundColor(contentType == type ? .black : .white)
-                                        .padding(.horizontal, 12)
-                                        .padding(.vertical, 6)
-                                        .background(
-                                            RoundedRectangle(cornerRadius: 14)
-                                                .fill(contentType == type ? Color.white : Color.white.opacity(0.2))
-                                        )
-                                }
-                                .scaleEffect(contentType == type ? 1.0 : 0.96)
-                                .animation(.spring(response: 0.28, dampingFraction: 0.85), value: contentType)
-                                .buttonStyle(PlainButtonStyle())
-                            }
-                        }
-                        .padding(.leading, 10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity), removal: .move(edge: .bottom).combined(with: .opacity)))
-                    }
-                }
-                .animation(.easeInOut(duration: 0.35), value: showPicker || isSearching)
-                .frame(height: 34)
-                .padding(.horizontal)
 
 
                 List {
@@ -2612,7 +2641,12 @@ struct SearchView: View {
             }
             .navigationTitle("Search")
             .onAppear {
-                filteredLibrary = libraryManager.searchSongs(query: query)
+                // Only show library results if there's a query
+                if !query.isEmpty {
+                    filteredLibrary = libraryManager.searchSongs(query: query)
+                } else {
+                    filteredLibrary = []
+                }
             }
         }
     }
@@ -2986,7 +3020,11 @@ struct AlbumDetailView: View {
     let albumArt: URL?
     @StateObject private var qobuzAPI = QobuzAPI()
     @EnvironmentObject var libraryManager: LibraryManager
+    @EnvironmentObject var player: MusicPlayer
     @State private var tracks: [TrackRow] = []
+    @State private var albumArtist: String? = nil
+    @State private var albumGenre: String? = nil
+    @State private var albumYear: String? = nil
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var addedSongs: Set<String> = []
@@ -3012,6 +3050,34 @@ struct AlbumDetailView: View {
 
                         VStack(alignment: .leading, spacing: 6) {
                             Text(albumTitle).font(.headline).lineLimit(3).foregroundColor(.white)
+                            
+                            // Artist name
+                            if let artist = albumArtist {
+                                Text(artist)
+                                    .font(.subheadline)
+                                    .foregroundColor(.white.opacity(0.8))
+                            }
+                            
+                            // Genre and Year
+                            HStack(spacing: 8) {
+                                if let genre = albumGenre {
+                                    Text(genre)
+                                        .font(.caption)
+                                        .foregroundColor(.white.opacity(0.7))
+                                }
+                                if let year = albumYear {
+                                    if albumGenre != nil {
+                                        Text("•")
+                                            .font(.caption)
+                                            .foregroundColor(.white.opacity(0.5))
+                                    }
+                                    Text(year)
+                                        .font(.caption)
+                                        .foregroundColor(.white.opacity(0.7))
+                                }
+                            }
+                            
+                            // Track count and duration
                             if !tracks.isEmpty {
                                 Text("\(tracks.count) tracks • \(totalDuration())")
                                     .font(.caption)
@@ -3087,7 +3153,7 @@ struct AlbumDetailView: View {
                                         let qobuzTrack = QobuzTrack(
                                             id: track.qobuzTrackId ?? 0,
                                             title: track.title,
-                                            artist: albumTitle,
+                                            artist: albumArtist ?? albumTitle,
                                             album: albumTitle,
                                             image: albumArt?.absoluteString,
                                             url: nil
@@ -3114,6 +3180,38 @@ struct AlbumDetailView: View {
                             .animation(.easeInOut(duration: 0.2), value: isAdding)
                         }
                         .listRowBackground(Color.clear)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            // Convert TrackRow to QobuzTrack for playing
+                            let qobuzTrack = QobuzTrack(
+                                id: track.qobuzTrackId ?? 0,
+                                title: track.title,
+                                artist: albumArtist ?? albumTitle,
+                                album: albumTitle,
+                                image: albumArt?.absoluteString,
+                                url: nil
+                            )
+                            
+                            // Prefer local if exists; else stream immediately
+                            if let localSong = libraryManager.findSongMatching(track: qobuzTrack),
+                               let _ = DownloadManager.shared.getLocalFileURL(for: localSong) {
+                                player.play(song: localSong)
+                            } else {
+                                let temp = TempSong(from: qobuzTrack)
+                                player.play(tempSong: temp)
+                                DownloadManager.shared.resolveStreamURLForQobuz(trackId: qobuzTrack.id) { result in
+                                    DispatchQueue.main.async {
+                                        switch result {
+                                        case .success(let url):
+                                            let updated = TempSong(id: temp.id, title: temp.title, artist: temp.artist, artwork: temp.artwork, album: temp.album, url: url.absoluteString)
+                                            AudioPlayer.shared.play(tempSong: updated)
+                                        case .failure(let error):
+                                            print("Failed to resolve stream URL: \(error)")
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -3144,18 +3242,28 @@ struct AlbumDetailView: View {
 
         do {
             let resp = try await qobuzAPI.getAlbum(albumID: albumID)
+            
+            // Store the artist name from the album data
+            albumArtist = resp.artist?.name
+            
+            // Fetch full album details to get genre and release date
+            try await fetchAlbumDetails()
+            
             let items = resp.tracks.items ?? []
-            var mapped: [TrackRow] = items.map {
-                TrackRow(
-                    id: String($0.id ?? Int.random(in: 1...9_999_999)),
-                    trackNumber: $0.trackNumber,
-                    title: $0.title ?? "Untitled",
-                    duration: $0.duration,
-                    isrc: $0.isrc,
-                    explicit: $0.parentalWarning ?? false,
-                    qobuzTrackId: $0.id
+            var mapped: [TrackRow] = items.enumerated().map { index, item in
+                // Use trackNumber from TrackItem, or fall back to position + 1 (1-based), or index + 1
+                let trackNum = item.trackNumber ?? (index + 1)
+                return TrackRow(
+                    id: String(item.id ?? Int.random(in: 1...9_999_999)),
+                    trackNumber: trackNum,
+                    title: item.title ?? "Untitled",
+                    duration: item.duration,
+                    isrc: item.isrc,
+                    explicit: item.parentalWarning ?? false,
+                    qobuzTrackId: item.id
                 )
             }
+            // Sort by track number first, then by title if track numbers are equal
             mapped.sort {
                 let a = $0.trackNumber ?? Int.max
                 let b = $1.trackNumber ?? Int.max
@@ -3173,6 +3281,54 @@ struct AlbumDetailView: View {
             }
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+    
+    private func fetchAlbumDetails() async throws {
+        // Fetch the full album response to get genre and release date
+        // We'll decode the raw response directly
+        try await qobuzAPI.ensureValidToken()
+        
+        guard let token = qobuzAPI.currentBearerToken else {
+            return
+        }
+        
+        guard var comps = URLComponents(string: "https://www.qobuz.com/api.json/0.2/album/get") else {
+            return
+        }
+        comps.queryItems = [URLQueryItem(name: "album_id", value: albumID)]
+        guard let url = comps.url else { return }
+
+        var req = URLRequest(url: url)
+        req.setValue("650769754", forHTTPHeaderField: "x-app-id")
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "authorization")
+        req.timeoutInterval = 20
+        
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { return }
+        
+        guard (200..<300).contains(http.statusCode) else {
+            return
+        }
+
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .useDefaultKeys
+        do {
+            let albumResponse = try decoder.decode(QobuzAlbumGetResponse.self, from: data)
+            
+            // Extract genre and year
+            albumGenre = albumResponse.genre?.name
+            
+            // Extract year from release date
+            if let releaseDate = albumResponse.releaseDateOriginal ?? albumResponse.releaseDateDownload {
+                // Parse date string (format: "YYYY-MM-DD")
+                let components = releaseDate.split(separator: "-")
+                if let year = components.first {
+                    albumYear = String(year)
+                }
+            }
+        } catch {
+            print("Failed to decode album details: \(error)")
         }
     }
 }

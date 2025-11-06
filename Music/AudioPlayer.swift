@@ -130,6 +130,10 @@ class AudioPlayer: NSObject, ObservableObject {
                                                selector: #selector(handleInterruption(_:)),
                                                name: AVAudioSession.interruptionNotification,
                                                object: nil)
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(handleRouteChange(_:)),
+                                               name: AVAudioSession.routeChangeNotification,
+                                               object: nil)
     }
     
     @objc private func handleInterruption(_ notification: Notification) {
@@ -146,6 +150,31 @@ class AudioPlayer: NSObject, ObservableObject {
                     resume()
                 }
             }
+        }
+    }
+    
+    @objc private func handleRouteChange(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let reasonValue = userInfo[AVAudioSessionRouteChangeReasonKey] as? UInt,
+              let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else { return }
+        
+        // Pause playback when audio route is disconnected (e.g., Bluetooth, headphones)
+        switch reason {
+        case .oldDeviceUnavailable:
+            // Audio output device was disconnected (Bluetooth, headphones, etc.)
+            if isPlaying {
+                pause()
+            }
+        case .newDeviceAvailable:
+            // New audio output device became available - don't pause, just continue
+            break
+        case .categoryChange:
+            // Audio session category changed - pause to be safe
+            if isPlaying {
+                pause()
+            }
+        default:
+            break
         }
     }
     
