@@ -21,6 +21,7 @@ class AudioPlayer: NSObject, ObservableObject {
     @Published var volume: Float = 1.0
     
     private var player: AVPlayer?
+    private var currentPlayerItem: AVPlayerItem?
     private var timeObserver: Any?
     private var audioEngine: AVAudioEngine?
     private var audioPlayerNode: AVAudioPlayerNode?
@@ -338,8 +339,12 @@ class AudioPlayer: NSObject, ObservableObject {
     }
     
     private func playWithAVPlayer(url: URL, fallbackURL: URL? = nil) {
+        // Clean up previous player item observers before creating new one
+        cleanupPlayerItem()
+        
         // Create AVPlayerItem from URL
         let playerItem = AVPlayerItem(url: url)
+        currentPlayerItem = playerItem
         player = AVPlayer(playerItem: playerItem)
         
         // Add observer for when the item is ready to play
@@ -368,6 +373,15 @@ class AudioPlayer: NSObject, ObservableObject {
         // Start time observer
         startTimeObserver()
         updateNowPlayingInfo()
+    }
+    
+    private func cleanupPlayerItem() {
+        // Remove observers from previous player item
+        if let previousItem = currentPlayerItem {
+            NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: previousItem)
+            previousItem.removeObserver(self, forKeyPath: "status")
+            currentPlayerItem = nil
+        }
     }
     
     private func startHighQualityTimeObserver() {
@@ -437,6 +451,9 @@ class AudioPlayer: NSObject, ObservableObject {
         hqStartTimeOffset = 0
         isSeekingHQ = false
         playbackGeneration &+= 1
+        
+        // Clean up player item observers before stopping
+        cleanupPlayerItem()
         
         // Stop AVPlayer
         player?.pause()

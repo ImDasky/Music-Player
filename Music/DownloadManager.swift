@@ -589,13 +589,39 @@ class DownloadManager: ObservableObject {
         if !FileManager.default.fileExists(atPath: artworkDirectory.path) {
             try? FileManager.default.createDirectory(at: artworkDirectory, withIntermediateDirectories: true)
         }
-        let artworkFileName = "\(song.id?.uuidString ?? UUID().uuidString).jpg"
-        let artworkURL = artworkDirectory.appendingPathComponent(artworkFileName)
+        
         // Validate that data is a decodable image; avoid writing corrupt or non-art data
         guard UIImage(data: data) != nil else {
             print("Artwork data is not a valid image; skipping save")
             return
         }
+        
+        // Create filename based on album and artist to share artwork across songs from same album
+        let artworkFileName: String
+        if let album = song.album, !album.isEmpty, let artist = song.artist, !artist.isEmpty {
+            // Use album + artist for filename (sanitized for filesystem)
+            let sanitizedAlbum = sanitizeFilename(album)
+            let sanitizedArtist = sanitizeFilename(artist)
+            artworkFileName = "\(sanitizedArtist)_\(sanitizedAlbum).jpg"
+        } else {
+            // Fallback to song ID if no album/artist info
+            artworkFileName = "\(song.id?.uuidString ?? UUID().uuidString).jpg"
+        }
+        
+        let artworkURL = artworkDirectory.appendingPathComponent(artworkFileName)
+        
+        // Check if artwork file already exists (for same album)
+        if FileManager.default.fileExists(atPath: artworkURL.path) {
+            // Artwork already exists for this album, just reference it
+            song.artwork = artworkURL.path
+            // Notify UI listeners that artwork was updated for this song
+            if let id = song.id {
+                NotificationCenter.default.post(name: .artworkUpdated, object: nil, userInfo: ["songId": id])
+            }
+            return
+        }
+        
+        // Save new artwork file
         do {
             try data.write(to: artworkURL, options: .atomic)
             song.artwork = artworkURL.path
@@ -606,6 +632,18 @@ class DownloadManager: ObservableObject {
         } catch {
             print("Failed to save artwork: \(error)")
         }
+    }
+    
+    // Helper function to sanitize filenames for filesystem
+    private func sanitizeFilename(_ filename: String) -> String {
+        let invalidChars = CharacterSet(charactersIn: "/\\?%*|\"<>")
+        let sanitized = filename.components(separatedBy: invalidChars).joined(separator: "_")
+        // Limit length to avoid filesystem issues
+        let maxLength = 100
+        if sanitized.count > maxLength {
+            return String(sanitized.prefix(maxLength))
+        }
+        return sanitized
     }
 
     

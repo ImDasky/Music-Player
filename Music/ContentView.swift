@@ -448,8 +448,19 @@ final class MusicPlayer: ObservableObject {
     @Published var currentIndex: Int? = nil
     @Published var isShuffling: Bool = false
     @Published var repeatMode: RepeatMode = .off
+    @Published var navigateToAlbum: AlbumNavigationInfo? = nil
 
     enum RepeatMode { case off, one, all }
+    
+    struct AlbumNavigationInfo: Equatable {
+        let id: String
+        let title: String
+        let art: URL?
+        
+        static func == (lhs: AlbumNavigationInfo, rhs: AlbumNavigationInfo) -> Bool {
+            return lhs.id == rhs.id && lhs.title == rhs.title && lhs.art == rhs.art
+        }
+    }
 
     init() {
         NotificationCenter.default.addObserver(self, selector: #selector(onPlaybackFinished(_:)), name: .audioPlayerDidFinish, object: nil)
@@ -1347,6 +1358,7 @@ struct ContentView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @StateObject private var player = MusicPlayer()
     @StateObject private var libraryManager: LibraryManager
+    @State private var selectedTab: Int = 0 // 0 = Library, 1 = Radio, 2 = Search
     
     private let miniPlayerBottomPadding: CGFloat = 0
 
@@ -1358,7 +1370,7 @@ struct ContentView: View {
     }
 
     var body: some View {
-        TabView {
+        TabView(selection: $selectedTab) {
             // Library Tab
             ZStack(alignment: .bottom) {
                 LibraryView()
@@ -1380,6 +1392,7 @@ struct ContentView: View {
                 }
                 Text("Library")
             }
+            .tag(0)
 
             // Radio Tab
             ZStack(alignment: .bottom) {
@@ -1393,6 +1406,7 @@ struct ContentView: View {
             .tabItem {
                 Label("Radio", systemImage: "dot.radiowaves.left.and.right")
             }
+            .tag(1)
 
             // Search Tab
             ZStack(alignment: .bottom) {
@@ -1409,8 +1423,15 @@ struct ContentView: View {
             .tabItem {
                 Label("Search", systemImage: "magnifyingglass")
             }
+            .tag(2)
         }
         .accentColor(.white)
+        .onChange(of: player.navigateToAlbum) { albumInfo in
+            if albumInfo != nil {
+                // Switch to search tab (index 2)
+                selectedTab = 2
+            }
+        }
     }
 }
 
@@ -1516,10 +1537,6 @@ struct FullPlayerView: View {
     @State private var tempTime: Double = 0
     @State private var showUpNext = false
     @State private var showPlaylistSheet = false
-    @State private var showAlbumView = false
-    @State private var albumID: String? = nil
-    @State private var albumTitle: String? = nil
-    @State private var albumArt: URL? = nil
 
     // Use MusicPlayer's repeat mode
 
@@ -1705,19 +1722,6 @@ struct FullPlayerView: View {
                     AddToPlaylistSheet(song: song) { showPlaylistSheet = false }
                 }
             }
-            .sheet(isPresented: $showAlbumView) {
-                if let albumID = albumID, let albumTitle = albumTitle {
-                    NavigationView {
-                        AlbumDetailView(
-                            albumID: albumID,
-                            albumTitle: albumTitle,
-                            albumArt: albumArt
-                        )
-                        .environmentObject(libraryManager)
-                        .environmentObject(player)
-                    }
-                }
-            }
     }
     
     private func showAlbum(for song: Song) async {
@@ -1743,10 +1747,12 @@ struct FullPlayerView: View {
                 
                 // Find matching album
                 if let album = qobuzAPI.albums.first(where: { $0.title.localizedCaseInsensitiveContains(albumName) || albumName.localizedCaseInsensitiveContains($0.title) }) {
-                    self.albumID = album.id
-                    self.albumTitle = album.title
-                    self.albumArt = URL(string: album.image ?? "")
-                    self.showAlbumView = true
+                    // Navigate to album in search tab
+                    player.navigateToAlbum = MusicPlayer.AlbumNavigationInfo(
+                        id: album.id,
+                        title: album.title,
+                        art: URL(string: album.image ?? "")
+                    )
                 }
             }
         }
@@ -1796,15 +1802,21 @@ struct FullPlayerView: View {
             }
             
             if let albumId = albumId {
-                self.albumID = albumId
-                self.albumTitle = album["title"] as? String ?? (player.currentSong as? Song)?.album
+                let albumTitle = album["title"] as? String ?? (player.currentSong as? Song)?.album ?? "Unknown Album"
+                var albumArt: URL? = nil
                 if let image = album["image"] as? [String: Any],
                    let large = image["large"] as? String {
-                    self.albumArt = URL(string: large)
+                    albumArt = URL(string: large)
                 } else if let artwork = (player.currentSong as? Song)?.artwork {
-                    self.albumArt = URL(string: artwork)
+                    albumArt = URL(string: artwork)
                 }
-                self.showAlbumView = true
+                
+                // Navigate to album in search tab
+                player.navigateToAlbum = MusicPlayer.AlbumNavigationInfo(
+                    id: albumId,
+                    title: albumTitle,
+                    art: albumArt
+                )
             }
         }
     }
@@ -2480,6 +2492,7 @@ struct SearchView: View {
     @State private var filteredLibrary: [Song] = []
     @State private var addedSongs: Set<String> = [] // Track which songs were just added
     @State private var addingSongs: Set<String> = [] // Track which songs are currently being added
+    @State private var showAlbumNavigation = false
 
     var body: some View {
         NavigationView {
@@ -2802,6 +2815,38 @@ struct SearchView: View {
                     filteredLibrary = []
                 }
             }
+            .onChange(of: player.navigateToAlbum) { albumInfo in
+                if albumInfo != nil {
+                    // Switch to New Music mode when navigating to album
+                    mode = .newMusic
+                    showAlbumNavigation = true
+                }
+            }
+            .background(
+                NavigationLink(
+                    destination: Group {
+                        if let albumInfo = player.navigateToAlbum {
+                            AlbumDetailView(
+                                albumID: albumInfo.id,
+                                albumTitle: albumInfo.title,
+                                albumArt: albumInfo.art
+                            )
+                            .environmentObject(libraryManager)
+                            .environmentObject(player)
+                            .onAppear {
+                                // Clear navigation state after navigation
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                    player.navigateToAlbum = nil
+                                    showAlbumNavigation = false
+                                }
+                            }
+                        }
+                    },
+                    isActive: $showAlbumNavigation
+                ) {
+                    EmptyView()
+                }
+            )
         }
     }
 }
