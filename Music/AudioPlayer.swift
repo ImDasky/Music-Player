@@ -376,10 +376,31 @@ class AudioPlayer: NSObject, ObservableObject {
         // Clean up previous player item observers before creating new one
         cleanupPlayerItem()
         
-        // Create AVPlayerItem from URL
-        let playerItem = AVPlayerItem(url: url)
+        // Create AVPlayerItem from URL with optimized settings for streaming
+        let asset = AVURLAsset(url: url, options: [
+            AVURLAssetPreferPreciseDurationAndTimingKey: false // Faster loading - don't wait for precise timing
+        ])
+        let playerItem = AVPlayerItem(asset: asset)
+        
+        // Minimize buffering for immediate playback start
+        if #available(iOS 10.0, *) {
+            playerItem.preferredForwardBufferDuration = 0 // No forward buffering - start immediately
+            // Reduce canUseNetworkResourcesForLiveStreamingWhilePaused to start faster
+            playerItem.canUseNetworkResourcesForLiveStreamingWhilePaused = false
+        }
+        
         currentPlayerItem = playerItem
         player = AVPlayer(playerItem: playerItem)
+        
+        // Don't wait for buffering - start playing as soon as possible
+        if #available(iOS 10.0, *) {
+            player?.automaticallyWaitsToMinimizeStalling = false // Start immediately, even if it might stutter
+        }
+        
+        // Preload the asset to start downloading immediately
+        asset.loadValuesAsynchronously(forKeys: ["playable", "tracks"]) { [weak self] in
+            // Asset is loading in background - playback will start as soon as ready
+        }
         
         // Add observer for when the item is ready to play
         NotificationCenter.default.addObserver(
@@ -400,9 +421,16 @@ class AudioPlayer: NSObject, ObservableObject {
         player?.play()
         updateIsPlaying(true)
         
-        // Get duration
-        let duration = playerItem.asset.duration
-        self.duration = CMTimeGetSeconds(duration)
+        // Get duration asynchronously to avoid blocking
+        asset.loadValuesAsynchronously(forKeys: ["duration"]) { [weak self] in
+            DispatchQueue.main.async {
+                if asset.statusOfValue(forKey: "duration", error: nil) == .loaded {
+                    let duration = asset.duration
+                    self?.duration = CMTimeGetSeconds(duration)
+                    self?.updateNowPlayingInfo()
+                }
+            }
+        }
         
         // Start time observer
         startTimeObserver()
