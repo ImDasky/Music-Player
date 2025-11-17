@@ -398,8 +398,9 @@ class AudioPlayer: NSObject, ObservableObject {
         }
         
         // Preload the asset to start downloading immediately
-        asset.loadValuesAsynchronously(forKeys: ["playable", "tracks"]) { [weak self] in
-            // Asset is loading in background - playback will start as soon as ready
+        Task {
+            _ = try? await asset.load(.isPlayable)
+            _ = try? await asset.load(.tracks)
         }
         
         // Add observer for when the item is ready to play
@@ -422,13 +423,17 @@ class AudioPlayer: NSObject, ObservableObject {
         updateIsPlaying(true)
         
         // Get duration asynchronously to avoid blocking
-        asset.loadValuesAsynchronously(forKeys: ["duration"]) { [weak self] in
-            DispatchQueue.main.async {
-                if asset.statusOfValue(forKey: "duration", error: nil) == .loaded {
-                    let duration = asset.duration
-                    self?.duration = CMTimeGetSeconds(duration)
-                    self?.updateNowPlayingInfo()
+        Task { [weak self] in
+            do {
+                let duration = try await asset.load(.duration)
+                let durationSeconds = CMTimeGetSeconds(duration)
+                await MainActor.run { [weak self] in
+                    guard let self = self else { return }
+                    self.duration = durationSeconds
+                    self.updateNowPlayingInfo()
                 }
+            } catch {
+                print("Failed to load duration: \(error)")
             }
         }
         

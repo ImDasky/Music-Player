@@ -4,7 +4,7 @@ import CoreData
 import AVFoundation
 import MediaPlayer
 import Combine
-import CommonCrypto
+import CryptoKit
 
 // MARK: - BlurView (UIVisualEffectView wrapper)
 struct BlurView: UIViewRepresentable {
@@ -1019,11 +1019,8 @@ final class QobuzAPI: ObservableObject {
     
     private func md5Hash(_ string: String) -> String {
         let data = Data(string.utf8)
-        var digest = [UInt8](repeating: 0, count: Int(CC_MD5_DIGEST_LENGTH))
-        _ = data.withUnsafeBytes { bytes in
-            CC_MD5(bytes.baseAddress, CC_LONG(data.count), &digest)
-        }
-        return digest.map { String(format: "%02x", $0) }.joined()
+        let hash = SHA256.hash(data: data)
+        return hash.compactMap { String(format: "%02x", $0) }.joined()
     }
 
     func search(query: String) {
@@ -1934,7 +1931,7 @@ struct UpNextView: View {
     var body: some View {
         NavigationView {
             List {
-                if let idx = player.currentIndex {
+                if player.currentIndex != nil {
                     Section(header: Text("Up Next").foregroundColor(.white)) {
                         ForEach(player.upcoming, id: \.objectID) { song in
                             HStack {
@@ -2828,31 +2825,28 @@ struct SearchView: View {
                     showAlbumNavigation = true
                 }
             }
-            .background(
-                NavigationLink(
-                    destination: Group {
-                        if let albumInfo = player.navigateToAlbum {
-                            AlbumDetailView(
-                                albumID: albumInfo.id,
-                                albumTitle: albumInfo.title,
-                                albumArt: albumInfo.art
-                            )
-                            .environmentObject(libraryManager)
-                            .environmentObject(player)
-                            .onAppear {
-                                // Clear navigation state after navigation
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            .sheet(isPresented: $showAlbumNavigation) {
+                if let albumInfo = player.navigateToAlbum {
+                    NavigationView {
+                        AlbumDetailView(
+                            albumID: albumInfo.id,
+                            albumTitle: albumInfo.title,
+                            albumArt: albumInfo.art
+                        )
+                        .environmentObject(libraryManager)
+                        .environmentObject(player)
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .navigationBarTrailing) {
+                                Button("Done") {
                                     player.navigateToAlbum = nil
                                     showAlbumNavigation = false
                                 }
                             }
                         }
-                    },
-                    isActive: $showAlbumNavigation
-                ) {
-                    EmptyView()
+                    }
                 }
-            )
+            }
         }
     }
 }

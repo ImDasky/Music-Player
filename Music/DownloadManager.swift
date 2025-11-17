@@ -405,12 +405,18 @@ class DownloadManager: ObservableObject {
     
     private func getAudioDuration(for song: Song, at url: URL) {
         let asset = AVAsset(url: url)
-        let duration = asset.duration
-        let durationSeconds = CMTimeGetSeconds(duration)
-        
-        DispatchQueue.main.async {
-            song.duration = durationSeconds
-            try? song.managedObjectContext?.save()
+        Task {
+            do {
+                let duration = try await asset.load(.duration)
+                let durationSeconds = CMTimeGetSeconds(duration)
+                
+                await MainActor.run {
+                    song.duration = durationSeconds
+                    try? song.managedObjectContext?.save()
+                }
+            } catch {
+                print("Failed to load duration: \(error)")
+            }
         }
     }
     
@@ -609,37 +615,66 @@ class DownloadManager: ObservableObject {
     // MARK: - Embedded artwork extraction for local files
     private func extractAndSaveArtwork(from url: URL, for song: Song) {
         let asset = AVAsset(url: url)
-        // Try common metadata first
-        if let data = extractArtworkData(from: asset.commonMetadata) {
-            saveArtwork(data: data, for: song)
-            return
-        }
-        // Try all available formats
-        for fmt in asset.availableMetadataFormats {
-            if let data = extractArtworkData(from: asset.metadata(forFormat: fmt)) {
-                saveArtwork(data: data, for: song)
-                return
+        Task {
+            do {
+                // Try common metadata first
+                let commonMetadata = try await asset.load(.commonMetadata)
+                if let data = await extractArtworkData(from: commonMetadata) {
+                    await MainActor.run {
+                        saveArtwork(data: data, for: song)
+                    }
+                    return
+                }
+                
+                // Try all available formats
+                let formats = try await asset.load(.availableMetadataFormats)
+                for fmt in formats {
+                    let metadata = try await asset.loadMetadata(for: fmt)
+                    if let data = await extractArtworkData(from: metadata) {
+                        await MainActor.run {
+                            saveArtwork(data: data, for: song)
+                        }
+                        return
+                    }
+                }
+                
+                // Fallback: parse FLAC PICTURE block manually
+                if url.pathExtension.lowercased() == "flac", let data = parseFLACPicture(at: url) {
+                    await MainActor.run {
+                        saveArtwork(data: data, for: song)
+                    }
+                    return
+                }
+            } catch {
+                print("Failed to extract artwork: \(error)")
+                // Fallback: parse FLAC PICTURE block manually
+                if url.pathExtension.lowercased() == "flac", let data = parseFLACPicture(at: url) {
+                    saveArtwork(data: data, for: song)
+                }
             }
-        }
-        // Fallback: parse FLAC PICTURE block manually
-        if url.pathExtension.lowercased() == "flac", let data = parseFLACPicture(at: url) {
-            saveArtwork(data: data, for: song)
-            return
         }
     }
     
-    private func extractArtworkData(from items: [AVMetadataItem]) -> Data? {
+    private func extractArtworkData(from items: [AVMetadataItem]) async -> Data? {
         // Prefer items marked as artwork
         var fallbackData: Data? = nil
         for item in items {
             if let key = item.commonKey, key == .commonKeyArtwork {
+                if let data = try? await item.load(.dataValue) { return data }
+                if let data = try? await item.load(.value) as? Data { return data }
+                // Fallback to synchronous access for compatibility
                 if let data = item.dataValue { return data }
                 if let data = item.value as? Data { return data }
             }
             // Record a generic data-bearing item as a last resort
             if fallbackData == nil {
-                if let data = item.dataValue { fallbackData = data }
-                else if let data = item.value as? Data { fallbackData = data }
+                if let data = try? await item.load(.dataValue) { fallbackData = data }
+                else if let data = try? await item.load(.value) as? Data { fallbackData = data }
+                // Fallback to synchronous access
+                if fallbackData == nil {
+                    if let data = item.dataValue { fallbackData = data }
+                    else if let data = item.value as? Data { fallbackData = data }
+                }
             }
         }
         return fallbackData
