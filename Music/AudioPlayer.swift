@@ -30,9 +30,23 @@ class AudioPlayer: NSObject, ObservableObject {
     // Guard flags for completion handling
     private var isSeekingHQ: Bool = false
     private var playbackGeneration: UInt64 = 0
+    private var hqTimeObserverTimer: Timer?
+    // Track if playback was interrupted (was playing when interruption began)
+    private var wasPlayingBeforeInterruption: Bool = false
     
     // High-quality audio settings
     private let sampleRate: Double = 96000.0  // 96kHz for high quality
+    
+    // Helper to update isPlaying on main thread to ensure UI sync
+    private func updateIsPlaying(_ value: Bool) {
+        if Thread.isMainThread {
+            isPlaying = value
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.isPlaying = value
+            }
+        }
+    }
     
     enum AudioQuality: String, CaseIterable {
         case standard = "Standard (44.1kHz)"
@@ -142,14 +156,29 @@ class AudioPlayer: NSObject, ObservableObject {
               let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
               let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
         
-        if type == .began {
-            pause()
-        } else if type == .ended {
-            if let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt {
-                let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
-                if options.contains(.shouldResume) {
-                    resume()
+        // Ensure we're on main thread for UI updates
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            
+            if type == .began {
+                // Remember if we were playing when interruption began
+                // Only auto-resume later if we were actually playing (not manually paused)
+                self.wasPlayingBeforeInterruption = self.isPlaying
+                if self.isPlaying {
+                    self.pause()
                 }
+            } else if type == .ended {
+                // Only auto-resume if:
+                // 1. System says we should resume (.shouldResume)
+                // 2. We were actually playing when interruption began (not manually paused)
+                if let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt {
+                    let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
+                    if options.contains(.shouldResume) && self.wasPlayingBeforeInterruption {
+                        self.resume()
+                    }
+                }
+                // Reset flag after handling interruption
+                self.wasPlayingBeforeInterruption = false
             }
         }
     }
@@ -159,23 +188,28 @@ class AudioPlayer: NSObject, ObservableObject {
               let reasonValue = userInfo[AVAudioSessionRouteChangeReasonKey] as? UInt,
               let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else { return }
         
-        // Pause playback when audio route is disconnected (e.g., Bluetooth, headphones)
-        switch reason {
-        case .oldDeviceUnavailable:
-            // Audio output device was disconnected (Bluetooth, headphones, etc.)
-            if isPlaying {
-                pause()
+        // Ensure we're on main thread for UI updates
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            
+            // Pause playback when audio route is disconnected (e.g., Bluetooth, headphones)
+            switch reason {
+            case .oldDeviceUnavailable:
+                // Audio output device was disconnected (Bluetooth, headphones, etc.)
+                if self.isPlaying {
+                    self.pause()
+                }
+            case .newDeviceAvailable:
+                // New audio output device became available - don't pause, just continue
+                break
+            case .categoryChange:
+                // Audio session category changed - pause to be safe
+                if self.isPlaying {
+                    self.pause()
+                }
+            default:
+                break
             }
-        case .newDeviceAvailable:
-            // New audio output device became available - don't pause, just continue
-            break
-        case .categoryChange:
-            // Audio session category changed - pause to be safe
-            if isPlaying {
-                pause()
-            }
-        default:
-            break
         }
     }
     
@@ -208,7 +242,7 @@ class AudioPlayer: NSObject, ObservableObject {
         } else {
             print("No local file or streaming URL available")
             // Nothing to play; clear state
-            isPlaying = false
+            updateIsPlaying(false)
             currentSong = nil
             updateNowPlayingInfo()
         }
@@ -225,7 +259,7 @@ class AudioPlayer: NSObject, ObservableObject {
         if let urlString = tempSong.url, let url = URL(string: urlString) {
             playFromURL(url, isLocalFile: false)
         } else {
-            isPlaying = false
+            updateIsPlaying(false)
             currentTempSong = nil
             updateNowPlayingInfo()
         }
@@ -290,7 +324,7 @@ class AudioPlayer: NSObject, ObservableObject {
                     guard let self = self else { return }
                     // Ignore completion if a seek or new schedule occurred
                     if self.isSeekingHQ || generationAtSchedule != self.playbackGeneration { return }
-                    self.isPlaying = false
+                    self.updateIsPlaying(false)
                     self.currentTime = 0
                     self.postFinished()
                 }
@@ -317,7 +351,7 @@ class AudioPlayer: NSObject, ObservableObject {
             }
             
             playerNode.play()
-            isPlaying = true
+            updateIsPlaying(true)
             
             // Get duration
             duration = Double(file.length) / file.processingFormat.sampleRate
@@ -364,7 +398,7 @@ class AudioPlayer: NSObject, ObservableObject {
         
         // Start playing (will actually start when ready)
         player?.play()
-        isPlaying = true
+        updateIsPlaying(true)
         
         // Get duration
         let duration = playerItem.asset.duration
@@ -385,8 +419,11 @@ class AudioPlayer: NSObject, ObservableObject {
     }
     
     private func startHighQualityTimeObserver() {
+        // Invalidate any existing timer first
+        hqTimeObserverTimer?.invalidate()
+        
         // For high-quality playback, we need to track time differently
-        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
+        hqTimeObserverTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
             guard let self = self, let playerNode = self.audioPlayerNode else {
                 timer.invalidate()
                 return
@@ -408,26 +445,71 @@ class AudioPlayer: NSObject, ObservableObject {
     func pause() {
         if let playerNode = audioPlayerNode {
             playerNode.pause()
+            // Invalidate timer when pausing
+            hqTimeObserverTimer?.invalidate()
+            hqTimeObserverTimer = nil
         } else {
             player?.pause()
         }
-        isPlaying = false
+        updateIsPlaying(false)
         updateNowPlayingInfo()
     }
     
     func resume() {
+        // Ensure audio session is active before resuming
+        do {
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            print("Failed to activate audio session on resume: \(error)")
+            // If activation fails, try to reconfigure the session
+            setupHighQualityAudioSession()
+        }
+        
         if let playerNode = audioPlayerNode, let engine = audioEngine {
+            // Always check and restart engine if needed, as it may have stopped
+            // even if it thinks it's running (e.g., after audio session deactivation)
             if !engine.isRunning {
                 engine.prepare()
-                do { try engine.start() } catch { print("Engine failed to restart on resume: \(error)") }
+                do { 
+                    try engine.start() 
+                } catch { 
+                    print("Engine failed to restart on resume: \(error)")
+                    // Try to reactivate audio session and retry
+                    do {
+                        try AVAudioSession.sharedInstance().setActive(true)
+                        engine.prepare()
+                        try engine.start()
+                    } catch {
+                        print("Engine failed to restart after session reactivation: \(error)")
+                        return
+                    }
+                }
             }
-            playerNode.play()
+            
+            // Ensure player node is playing
+            if !playerNode.isPlaying {
+                playerNode.play()
+            }
+            
             // Restart timer for high-quality playback to update currentTime
             startHighQualityTimeObserver()
         } else {
-            player?.play()
+            // For AVPlayer, ensure it's actually playing
+            if let player = player {
+                player.play()
+                // Double-check that playback actually started
+                if player.rate == 0 {
+                    // If rate is still 0, there might be an issue - try reactivating session
+                    do {
+                        try AVAudioSession.sharedInstance().setActive(true)
+                        player.play()
+                    } catch {
+                        print("Failed to reactivate session for AVPlayer: \(error)")
+                    }
+                }
+            }
         }
-        isPlaying = true
+        updateIsPlaying(true)
         updateNowPlayingInfo()
     }
     
@@ -452,6 +534,10 @@ class AudioPlayer: NSObject, ObservableObject {
         isSeekingHQ = false
         playbackGeneration &+= 1
         
+        // Clean up high-quality time observer
+        hqTimeObserverTimer?.invalidate()
+        hqTimeObserverTimer = nil
+        
         // Clean up player item observers before stopping
         cleanupPlayerItem()
         
@@ -459,7 +545,7 @@ class AudioPlayer: NSObject, ObservableObject {
         player?.pause()
         player = nil
         
-        isPlaying = false
+        updateIsPlaying(false)
         currentSong = nil
         currentTempSong = nil
         currentTime = 0
@@ -489,7 +575,7 @@ class AudioPlayer: NSObject, ObservableObject {
                     guard let self = self else { return }
                     // Ignore completion events that were caused by a seek or superseded schedule
                     if self.isSeekingHQ || generationAtSchedule != self.playbackGeneration { return }
-                    self.isPlaying = false
+                    self.updateIsPlaying(false)
                     self.currentTime = 0
                     self.postFinished()
                 }
@@ -497,7 +583,7 @@ class AudioPlayer: NSObject, ObservableObject {
             playerNode.play()
             
             // Maintain playing state
-            isPlaying = true
+            updateIsPlaying(true)
             isSeekingHQ = false
         } else {
             // Seek in standard AVPlayer, preserve play/pause state
@@ -505,8 +591,15 @@ class AudioPlayer: NSObject, ObservableObject {
             let cmTime = CMTime(seconds: time, preferredTimescale: 1000)
             player?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
                 guard let self = self else { return }
-                if wasPlaying { self.player?.play(); self.isPlaying = true } else { self.isPlaying = false }
-                self.updateNowPlayingInfo()
+                DispatchQueue.main.async {
+                    if wasPlaying { 
+                        self.player?.play()
+                        self.updateIsPlaying(true) 
+                    } else { 
+                        self.updateIsPlaying(false) 
+                    }
+                    self.updateNowPlayingInfo()
+                }
             }
         }
         currentTime = time
@@ -595,7 +688,7 @@ class AudioPlayer: NSObject, ObservableObject {
     }
     
     @objc private func playerItemDidReachEnd(_ notification: Notification) {
-        isPlaying = false
+        updateIsPlaying(false)
         currentTime = 0
         stopTimeObserver()
         postFinished()
@@ -615,7 +708,7 @@ class AudioPlayer: NSObject, ObservableObject {
                 switch playerItem.status {
                 case .readyToPlay:
                     print("Audio is ready to play")
-                    isPlaying = true
+                    updateIsPlaying(true)
                     // Record recently played for library song when streaming path used
                     if let s = currentSong { RecentlyPlayedStore.shared.record(s.id) }
                     updateNowPlayingInfo()
@@ -626,7 +719,7 @@ class AudioPlayer: NSObject, ObservableObject {
                         print("Retrying playback with fallback URL: \(fb.absoluteString)")
                         playWithAVPlayer(url: fb, fallbackURL: nil)
                     } else {
-                    isPlaying = false
+                        updateIsPlaying(false)
                         updateNowPlayingInfo()
                     }
                 case .unknown:
