@@ -29,21 +29,6 @@ class DownloadManager: ObservableObject {
     @Published var activeDownloads: [UUID: DownloadProgress] = [:]
     private var progressObservers: [UUID: NSKeyValueObservation] = [:]
     
-    // Cache resolved stream URLs to avoid re-polling
-    private var streamURLCache: [Int: URL] = [:]
-    private var streamURLCacheLock = NSLock()
-    
-    // Optimized URLSession for faster requests
-    private lazy var optimizedSession: URLSession = {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 10.0
-        config.timeoutIntervalForResource = 30.0
-        config.httpMaximumConnectionsPerHost = 6 // Allow parallel connections
-        config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        config.urlCache = nil
-        return URLSession(configuration: config)
-    }()
-    
     private let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
     private let musicDirectory: URL
     
@@ -91,8 +76,7 @@ class DownloadManager: ObservableObject {
             return
         }
         
-        // Use optimized session for faster requests
-        optimizedSession.dataTask(with: url) { data, response, error in
+        URLSession.shared.dataTask(with: url) { data, response, error in
             if let error = error {
                 completion(.failure(error))
                 return
@@ -453,126 +437,80 @@ class DownloadManager: ObservableObject {
     
     // MARK: - Resolve Stream URL (reuse Qobuz flow without downloading)
     func resolveStreamURLForQobuz(trackId: Int, completion: @escaping (Result<URL, Error>) -> Void) {
-        // Check cache first
-        streamURLCacheLock.lock()
-        if let cachedURL = streamURLCache[trackId] {
-            streamURLCacheLock.unlock()
-            completion(.success(cachedURL))
-            return
-        }
-        streamURLCacheLock.unlock()
-        
-        // Request download ID and start polling immediately
         requestQobuzDownload(trackId: trackId) { [weak self] result in
             switch result {
-            case .success(let id):
-                // Start polling for the stream URL
-                self?.pollForStreamURL(downloadId: id, completion: { [weak self] urlResult in
-                    // Cache successful URLs for instant playback on next request
-                    if case .success(let url) = urlResult {
-                        self?.streamURLCacheLock.lock()
-                        self?.streamURLCache[trackId] = url
-                        self?.streamURLCacheLock.unlock()
-                    }
-                    completion(urlResult)
-                })
+            case .success(let downloadId):
+                self?.pollForStreamURL(downloadId: downloadId, completion: completion)
             case .failure(let error):
                 completion(.failure(error))
             }
         }
     }
 
-    private func pollForStreamURL(downloadId: String, completion: @escaping (Result<URL, Error>) -> Void, attempt: Int = 0) {
+    private func pollForStreamURL(downloadId: String, completion: @escaping (Result<URL, Error>) -> Void) {
         let statusURL = "https://us.doubledouble.top/dl/\(downloadId)"
         guard let url = URL(string: statusURL) else {
             completion(.failure(DownloadError.invalidURL)); return
         }
-        
-        // Timeout after 30 seconds (60 attempts * 0.5s)
-        guard attempt < 60 else {
-            completion(.failure(DownloadError.downloadFailed))
-            return
-        }
-        
-        // Use optimized session for faster polling
-        optimizedSession.dataTask(with: url) { [weak self] data, _, error in
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
             if let error = error { completion(.failure(error)); return }
             guard let data = data else { completion(.failure(DownloadError.noData)); return }
             do {
                 let statusResponse = try JSONDecoder().decode(DownloadStatusResponse.self, from: data)
-                
-                // Try to extract URL regardless of status - server might provide it early
-                if let fileURL = statusResponse.url, !fileURL.isEmpty {
-                    let corrected = self?.correctedDownloadURL(from: fileURL)
-                    if let corrected, let maybeURL = URL(string: corrected) {
-                        // If URL looks like a final media file (has extension), return it immediately
+                switch statusResponse.status {
+                case "queued":
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        self?.pollForStreamURL(downloadId: downloadId, completion: completion)
+                    }
+                case "done":
+                    if let fileURL = statusResponse.url {
+                        let corrected = self?.correctedDownloadURL(from: fileURL)
+                        guard let corrected, let maybeURL = URL(string: corrected) else {
+                            completion(.failure(DownloadError.invalidURL)); return
+                        }
+                        // If URL looks like a final media file (has extension), return it; otherwise try to resolve JSON, else poll again
                         if !maybeURL.pathExtension.isEmpty {
                             completion(.success(maybeURL))
-                            return
                         } else {
-                            // Try to resolve nested URL
                             self?.resolveIfStatusURL(maybeURL) { result in
                                 switch result {
                                 case .success(let finalURL):
-                                    if !finalURL.pathExtension.isEmpty {
+                                    if finalURL.pathExtension.isEmpty {
+                                        // Still not a media URL; poll again
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                                            self?.pollForStreamURL(downloadId: downloadId, completion: completion)
+                                        }
+                                    } else {
                                         completion(.success(finalURL))
-                                        return
                                     }
                                 case .failure:
-                                    break
+                                    // Could not resolve; poll again
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                                        self?.pollForStreamURL(downloadId: downloadId, completion: completion)
+                                    }
                                 }
-                                // If resolution failed or no extension, continue polling
-                                self?.continuePolling(downloadId: downloadId, status: statusResponse.status, completion: completion, attempt: attempt)
                             }
-                            return
                         }
-                    }
-                }
-                
-                // No URL yet, check status and continue polling
-                switch statusResponse.status {
-                case "done":
-                    // Status says done but no URL - poll once more with shorter delay
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                        self?.pollForStreamURL(downloadId: downloadId, completion: completion, attempt: attempt + 1)
-                    }
-                case "queued", "processing":
-                    // Active processing - poll quickly (0.5s)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        self?.pollForStreamURL(downloadId: downloadId, completion: completion, attempt: attempt + 1)
+                    } else {
+                        // No URL yet; poll again
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                            self?.pollForStreamURL(downloadId: downloadId, completion: completion)
+                        }
                     }
                 case "error", "failed":
                     completion(.failure(DownloadError.downloadFailed))
                 default:
-                    // Unknown status - poll with moderate delay
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                        self?.pollForStreamURL(downloadId: downloadId, completion: completion, attempt: attempt + 1)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        self?.pollForStreamURL(downloadId: downloadId, completion: completion)
                     }
                 }
             } catch {
-                // If not JSON (unexpected), poll again with short delay
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    self?.pollForStreamURL(downloadId: downloadId, completion: completion, attempt: attempt + 1)
+                // If not JSON (unexpected), poll again briefly
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    self?.pollForStreamURL(downloadId: downloadId, completion: completion)
                 }
             }
         }.resume()
-    }
-    
-    private func continuePolling(downloadId: String, status: String, completion: @escaping (Result<URL, Error>) -> Void, attempt: Int) {
-        switch status {
-        case "done":
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                self.pollForStreamURL(downloadId: downloadId, completion: completion, attempt: attempt + 1)
-            }
-        case "queued", "processing":
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                self.pollForStreamURL(downloadId: downloadId, completion: completion, attempt: attempt + 1)
-            }
-        default:
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                self.pollForStreamURL(downloadId: downloadId, completion: completion, attempt: attempt + 1)
-            }
-        }
     }
 
     private func correctedDownloadURL(from fileURL: String) -> String {
@@ -592,7 +530,7 @@ class DownloadManager: ObservableObject {
     private func resolveIfStatusURL(_ url: URL, completion: @escaping (Result<URL, Error>) -> Void) {
         // If URL appears to be a status endpoint (no extension or contains /dl/), try to fetch it and extract media URL
         if url.pathExtension.isEmpty || url.path.contains("/dl/") {
-            optimizedSession.dataTask(with: url) { [weak self] data, _, error in
+            URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
                 if let error = error { completion(.failure(error)); return }
                 guard let data = data else { completion(.failure(DownloadError.noData)); return }
                 if let status = try? JSONDecoder().decode(DownloadStatusResponse.self, from: data), let nested = status.url {
@@ -693,32 +631,9 @@ class DownloadManager: ObservableObject {
             return
         }
         
-        // Create filename based on album and artist to share artwork across songs from same album
-        let artworkFileName: String
-        if let album = song.album, !album.isEmpty, let artist = song.artist, !artist.isEmpty {
-            // Use album + artist for filename (sanitized for filesystem)
-            let sanitizedAlbum = sanitizeFilename(album)
-            let sanitizedArtist = sanitizeFilename(artist)
-            artworkFileName = "\(sanitizedArtist)_\(sanitizedAlbum).jpg"
-        } else {
-            // Fallback to song ID if no album/artist info
-            artworkFileName = "\(song.id?.uuidString ?? UUID().uuidString).jpg"
-        }
-        
+        let artworkFileName = "\(song.id?.uuidString ?? UUID().uuidString).jpg"
         let artworkURL = artworkDirectory.appendingPathComponent(artworkFileName)
         
-        // Check if artwork file already exists (for same album)
-        if FileManager.default.fileExists(atPath: artworkURL.path) {
-            // Artwork already exists for this album, just reference it
-            song.artwork = artworkURL.path
-            // Notify UI listeners that artwork was updated for this song
-            if let id = song.id {
-                NotificationCenter.default.post(name: .artworkUpdated, object: nil, userInfo: ["songId": id])
-            }
-            return
-        }
-        
-        // Save new artwork file
         do {
             try data.write(to: artworkURL, options: .atomic)
             song.artwork = artworkURL.path
@@ -731,18 +646,6 @@ class DownloadManager: ObservableObject {
         }
     }
     
-    // Helper function to sanitize filenames for filesystem
-    private func sanitizeFilename(_ filename: String) -> String {
-        let invalidChars = CharacterSet(charactersIn: "/\\?%*|\"<>")
-        let sanitized = filename.components(separatedBy: invalidChars).joined(separator: "_")
-        // Limit length to avoid filesystem issues
-        let maxLength = 100
-        if sanitized.count > maxLength {
-            return String(sanitized.prefix(maxLength))
-        }
-        return sanitized
-    }
-
     
     // Parse FLAC METADATA_BLOCK of type 6 (PICTURE) to extract embedded cover image
     private func parseFLACPicture(at url: URL) -> Data? {

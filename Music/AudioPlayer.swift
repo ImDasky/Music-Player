@@ -376,32 +376,10 @@ class AudioPlayer: NSObject, ObservableObject {
         // Clean up previous player item observers before creating new one
         cleanupPlayerItem()
         
-        // Create AVPlayerItem from URL with optimized settings for streaming
-        let asset = AVURLAsset(url: url, options: [
-            AVURLAssetPreferPreciseDurationAndTimingKey: false // Faster loading - don't wait for precise timing
-        ])
-        let playerItem = AVPlayerItem(asset: asset)
-        
-        // Minimize buffering for immediate playback start
-        if #available(iOS 10.0, *) {
-            playerItem.preferredForwardBufferDuration = 0 // No forward buffering - start immediately
-            // Reduce canUseNetworkResourcesForLiveStreamingWhilePaused to start faster
-            playerItem.canUseNetworkResourcesForLiveStreamingWhilePaused = false
-        }
-        
+        // Create AVPlayerItem from URL
+        let playerItem = AVPlayerItem(url: url)
         currentPlayerItem = playerItem
         player = AVPlayer(playerItem: playerItem)
-        
-        // Don't wait for buffering - start playing as soon as possible
-        if #available(iOS 10.0, *) {
-            player?.automaticallyWaitsToMinimizeStalling = false // Start immediately, even if it might stutter
-        }
-        
-        // Preload the asset to start downloading immediately
-        Task {
-            _ = try? await asset.load(.isPlayable)
-            _ = try? await asset.load(.tracks)
-        }
         
         // Add observer for when the item is ready to play
         NotificationCenter.default.addObserver(
@@ -422,20 +400,9 @@ class AudioPlayer: NSObject, ObservableObject {
         player?.play()
         updateIsPlaying(true)
         
-        // Get duration asynchronously to avoid blocking
-        Task { [weak self] in
-            do {
-                let duration = try await asset.load(.duration)
-                let durationSeconds = CMTimeGetSeconds(duration)
-                await MainActor.run { [weak self] in
-                    guard let self = self else { return }
-                    self.duration = durationSeconds
-                    self.updateNowPlayingInfo()
-                }
-            } catch {
-                print("Failed to load duration: \(error)")
-            }
-        }
+        // Get duration
+        let duration = playerItem.asset.duration
+        self.duration = CMTimeGetSeconds(duration)
         
         // Start time observer
         startTimeObserver()
