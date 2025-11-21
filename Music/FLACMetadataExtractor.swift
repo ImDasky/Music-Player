@@ -87,29 +87,9 @@ class FLACMetadataExtractor {
             try? FileManager.default.createDirectory(at: artworkDirectory, withIntermediateDirectories: true)
         }
         
-        // Create filename based on album and artist to share artwork across songs from same album
-        let artworkFileName: String
-        if let album = song.album, !album.isEmpty, let artist = song.artist, !artist.isEmpty {
-            // Use album + artist for filename (sanitized for filesystem)
-            let sanitizedAlbum = sanitizeFilename(album)
-            let sanitizedArtist = sanitizeFilename(artist)
-            artworkFileName = "\(sanitizedArtist)_\(sanitizedAlbum).jpg"
-        } else {
-            // Fallback to song ID if no album/artist info
-            artworkFileName = "\(song.id?.uuidString ?? UUID().uuidString).jpg"
-        }
-        
+        let artworkFileName = "\(song.id?.uuidString ?? UUID().uuidString).jpg"
         let artworkURL = artworkDirectory.appendingPathComponent(artworkFileName)
         
-        // Check if artwork file already exists (for same album)
-        if FileManager.default.fileExists(atPath: artworkURL.path) {
-            // Artwork already exists for this album, just reference it
-            song.artwork = artworkURL.path
-            print("Artwork already exists, referencing: \(artworkURL.path)")
-            return
-        }
-        
-        // Save new artwork file
         do {
             try data.write(to: artworkURL)
             song.artwork = artworkURL.path
@@ -117,18 +97,6 @@ class FLACMetadataExtractor {
         } catch {
             print("Failed to save artwork: \(error)")
         }
-    }
-    
-    // Helper function to sanitize filenames for filesystem
-    private static func sanitizeFilename(_ filename: String) -> String {
-        let invalidChars = CharacterSet(charactersIn: "/\\?%*|\"<>")
-        let sanitized = filename.components(separatedBy: invalidChars).joined(separator: "_")
-        // Limit length to avoid filesystem issues
-        let maxLength = 100
-        if sanitized.count > maxLength {
-            return String(sanitized.prefix(maxLength))
-        }
-        return sanitized
     }
     
     static func getArtworkImage(for song: Song) -> Data? {
